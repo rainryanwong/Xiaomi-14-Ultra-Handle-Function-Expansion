@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="xposedscope">
+        <item>com.android.camera</item>
+        <item>android</item>
+    </string-array>
+    <string name="app_name">摄影手柄功能拓展</string>
+</resources>

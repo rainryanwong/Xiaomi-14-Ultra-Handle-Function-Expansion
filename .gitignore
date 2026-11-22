@@ -1,0 +1,27 @@
+.gradle/
+.gradle-user/
+.kotlin/
+build/
+local.properties
+*.iml
+.idea/
+.DS_Store
+
+# gradle 构建日志（每次构建生成，不入库）
+build_run*.log
+
+# Android 调试签名（本地构建用，不入库）
+debug.keystore
+
+# 历史一次性补丁脚本（仅本地保留，不入库）
+fix_*.py
+patch_*.py
+rollback*.py
+setup.ps1
+finalize.ps1
+# dex 校验临时文件
+dex_check/
+
+# 本地测试 APK 留在 outputs 便于回退，不随版本提交
+outputs/*.apk
+outputs/*.zip

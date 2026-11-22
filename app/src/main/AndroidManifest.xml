@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <permission android:name="com.handlefix.all.permission.PROBE_ACTIVATION"
+        android:protectionLevel="signature" />
+    <uses-permission android:name="com.handlefix.all.permission.PROBE_ACTIVATION" />
+
+    <!-- Android 11+ 包可见性：配置页需精确读取已安装相机版本，决定是否显示 Phoenix 专属动作。 -->
+    <queries>
+        <package android:name="com.android.camera" />
+        <package android:name="com.prometheus.camera.rev" />
+    </queries>
+
+    <application
+        android:label="@string/app_name"
+        android:allowBackup="false"
+        android:hasCode="true"
+        android:icon="@drawable/ic_launcher"
+        android:theme="@style/Theme.HandleFix">
+
+        <activity
+            android:name="com.handlefix.ui.MainActivity"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name="com.handlefix.ui.KeyConfigActivity"
+            android:exported="false"/>
+
+        <activity
+            android:name="com.handlefix.ui.ImportBackupActivity"
+            android:exported="false"/>
+
+        <activity
+            android:name="com.handlefix.ui.EnvCheckActivity"
+            android:exported="false"/>
+
+        <activity
+            android:name="com.handlefix.ui.GripInputGuardActivity"
+            android:exported="false"/>
+
+        <activity
+            android:name="com.handlefix.ui.GripQuickLaunchActivity"
+            android:exported="false"/>
+
+        <meta-data android:name="xposedmodule" android:value="true"/>
+        <meta-data android:name="xposeddescription" android:value="为Xiaomi 14 Ultra 摄影手柄提供功能扩展，Prometheus Cam移植相机与官方相机双适配。"/>
+        <meta-data android:name="xposedminversion" android:value="82"/>
+        <meta-data android:name="xposedscope" android:resource="@array/xposedscope"/>
+    </application>
+</manifest>
