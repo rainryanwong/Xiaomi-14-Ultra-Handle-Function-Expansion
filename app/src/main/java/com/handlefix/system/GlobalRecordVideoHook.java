@@ -3,11 +3,14 @@ package com.handlefix.system;
 import android.app.ActivityManager;
 import android.content.Context;
 import android.content.Intent;
+import android.os.Build;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.os.UserHandle;
 import android.view.KeyEvent;
 
+import com.handlefix.Camera68LaunchTargets;
+import com.handlefix.CameraBuilds;
 import com.handlefix.HandleFixModule;
 import com.handlefix.ModeConfig;
 
@@ -83,7 +86,11 @@ final class GlobalRecordVideoHook {
         if (now - sLastTriggerAt < 1500L) {
             return null;
         }
-        if (!startVideo(context, policy)) {
+        boolean camera68 = ModeConfig.isCamera68Mapping();
+        if (camera68 != CameraBuilds.isCamera68Port(
+                GripQuickLaunchController.installedCameraVersion(context))
+                || (camera68 && Build.VERSION.SDK_INT < 35)) return null;
+        if (!startVideo(context, policy, camera68)) {
             HandleFixModule.log("global-record-video: VIDEO_CAMERA start failed; keep native event");
             return null;
         }
@@ -93,9 +100,16 @@ final class GlobalRecordVideoHook {
         return Long.valueOf(-1L);
     }
 
-    private static boolean startVideo(Context context, String policy) {
+    private static boolean startVideo(Context context, String policy, boolean camera68) {
+        if (camera68) {
+            // 每次系统长按录制都有独立的原生预览会话与真实调用方身份。
+            if (!GripQuickLaunchController.removeExistingCameraTasks(context, policy)) return false;
+            Intent intent = quickVideoIntent(policy, true);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            return GripQuickLaunchController.startCamera68Activity(context, intent);
+        }
         try {
-            Intent intent = quickVideoIntent(policy);
+            Intent intent = quickVideoIntent(policy, false);
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
             Method method = Context.class.getMethod("startActivityAsUser", Intent.class, UserHandle.class);
             method.invoke(context, intent, currentUserHandle());
@@ -104,7 +118,7 @@ final class GlobalRecordVideoHook {
             try {
                 // 仅回退到同一个 VIDEO_CAMERA Intent。不能在录像入口失败时改启动
                 // 普通相机主页，否则系统层会误报“快捷录像已启动”并吞掉原生按键。
-                Intent fallback = quickVideoIntent(policy);
+                Intent fallback = quickVideoIntent(policy, false);
                 fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
                 context.startActivity(fallback);
                 return true;
@@ -141,14 +155,19 @@ final class GlobalRecordVideoHook {
      * Keyguard 上，不绕过解锁。自动录制策略再携带模块私有标记，不能把“只进入界面”
      * 也伪装成 quick-video，否则旧配置升级后会无意自动开录。</p>
      */
-    private static Intent quickVideoIntent(String policy) {
+    private static Intent quickVideoIntent(String policy, boolean camera68) {
         Intent intent = new Intent("android.media.action.VIDEO_CAMERA");
         intent.setClassName(CAMERA_PACKAGE, "com.android.camera.Camera");
         if (ModeConfig.GLOBAL_RECORD_START.equals(policy)) {
             intent.putExtra(ModeConfig.EXTRA_HANDLEFIX_START_RECORDING, true);
-            intent.putExtra("quick_video_handle_key", true);
-            intent.putExtra("com.android.systemui.camera_launch_source",
-                    "quick_video_handle_key");
+            if (camera68) {
+                intent.putExtra("com.android.systemui.camera_launch_source",
+                        Camera68LaunchTargets.RECORD_LAUNCH_SOURCE);
+            } else {
+                intent.putExtra("quick_video_handle_key", true);
+                intent.putExtra("com.android.systemui.camera_launch_source",
+                        "quick_video_handle_key");
+            }
         } else {
             intent.putExtra("com.android.systemui.camera_launch_source",
                     "handlefix_open_video");

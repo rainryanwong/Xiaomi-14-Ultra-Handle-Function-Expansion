@@ -27,7 +27,10 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import com.handlefix.ModeConfig
 import com.handlefix.CameraBuilds
+import com.handlefix.Camera68InputCapabilities
+import com.handlefix.GripModeWhitelist
 import com.handlefix.NativeFilterPanelHooks
+import com.handlefix.activation.LspActivationMonitor
 import org.json.JSONObject
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Text
@@ -72,12 +75,14 @@ class KeyConfigActivity : ComponentActivity() {
 
 // 模式列表：更多模式默认隐藏（开发者选项启用后显示）
 private const val MODE_LEICA_INSTANT = 256
-private val MODES = intArrayOf(163, 162, MODE_LEICA_INSTANT, 167, 180, 173, 171, 186, 225, 175,
+private val MODES = intArrayOf(163, 162, MODE_LEICA_INSTANT, 167, 180,
+    Camera68InputCapabilities.CINEMASTER, Camera68InputCapabilities.AI_CAPTURE, 173, 171, 186, 225,
+    Camera68InputCapabilities.EQUIP_STREET, 175,
     172, 169, 204, 227, 187, 166, 184, 188, 183, 205)
 // 模式基础名（不含编号）；「显示模式编号」开关打开时在显示处拼接 (163) 等
 private val MODE_NAMES = arrayOf(
-    "拍照", "录像", "徕卡一瞬", "专业拍照", "专业录像",
-    "夜景", "人像", "文档", "街拍", "超清",
+    "拍照", "录像", "徕卡一瞬", "专业拍照", "专业录像", "导演模式", "AI帮拍",
+    "夜景", "人像", "文档", "街拍", "经典／传奇街拍", "超清",
     "慢动作", "延时摄影", "前后双景", "电影", "长曝光",
     "全景", "萌拍", "超级月亮", "短视频", "AI水印",
 )
@@ -145,75 +150,6 @@ private fun readClassicStyleCatalog(cameraVersionCode: Long): ClassicStyleCatalo
         null
     }
 }
-
-// 功能过滤表（录像键短按）。Phoenix 的“徕卡经典风格（Phoenix）”由作者 LSP
-// 统一保存当前 LUT，不依赖拍照页的某个单独入口；因此在已确认可切换的五个拍照
-// 模式中都允许选择。录像/专业录像等模式仍不放开，避免把只对静态预览生效的
-// 风格动作写入不兼容的配置。
-private val MODE_FILTER = mapOf(
-    "0" to null,
-    "163" to setOf("0", "A", "B", "C", "V", ModeConfig.F_PHOENIX_CLASSIC_STYLE,
-        ModeConfig.F_FILTER),
-    "162" to setOf("0", "B", "F", "V", ModeConfig.F_FILTER),
-    // 专业参数预设先保留在 167 的 Prometheus 集合；普通模式下由能力门继续过滤。
-    // 开发者模式会显示该按键目录中的全部功能，但不会绕过相机进程的运行时安全门。
-    "167" to setOf("0", "A", "G", "R", "D", "S", "X", "H", "V", "W",
-        ModeConfig.F_PARAM_PANEL, ModeConfig.F_PHOENIX_CLASSIC_STYLE,
-        ModeConfig.F_FILTER), // 用户规则：过滤 C 快门释放模式
-    "180" to setOf("0", "B", "R", "D", "X", "H", "T", "U", "V",
-        ModeConfig.F_FILTER), // 用户规则：过滤 S 摄影风格、F 超防抖
-    "173" to setOf("0", "A", "V", ModeConfig.F_PHOENIX_CLASSIC_STYLE),
-    "171" to setOf("0", "A", "V", ModeConfig.F_PHOENIX_CLASSIC_STYLE,
-        ModeConfig.F_FILTER),
-    "186" to setOf("0", "V"),
-    "225" to setOf("0", "A", "C", "V", ModeConfig.F_PHOENIX_CLASSIC_STYLE,
-        ModeConfig.F_FILTER),
-    // 超清的基础录像键规则只有“跟随全局”；本轮新增的 Phoenix 原生滤镜面板
-    // 明确包含超清，因此最终仅额外开放 Q，不继承其它拍照模式功能。
-    "175" to setOf("0", ModeConfig.F_FILTER),
-    // Phoenix 的独立 256 模式；只在 Prometheus Cam 方案下显示。
-    "256" to setOf("0", "V"),
-)
-
-// 快门键过滤表：高速连拍(1)仅 163/225 默认展示
-private val SHUTTER_FILTER = mapOf(
-    "0" to null,
-    "163" to setOf("0", "C", "1"),
-    "225" to setOf("0", "C", "1"),
-    "162" to setOf("0", "C"), "167" to setOf("0", "C"), "180" to setOf("0", "C"),
-    "173" to setOf("0", "C"), "171" to setOf("0", "C"), "186" to setOf("0", "C"),
-    "175" to setOf("0", "C"),
-    "256" to setOf("0", "C"),
-)
-
-// 波轮过滤表（用户规则）
-private val WHEEL_FILTER = mapOf(
-    "0" to null,
-    "163" to setOf("0", "K", "M"),
-    "162" to setOf("0", "K", "M"),
-    // EV(K) 夜景曝光补偿：官方相机原生支持；PrometheusCam 自 NRV1.5.0 起作者已适配
-    // （V5.1/NRV-1.3.2 可能仍不支持，选择后无效属作者版本差异）
-    "173" to setOf("0", "K", "M"),
-    "167" to setOf("0", "K", "M", "N", "L", "D", "O", "J"),
-    "180" to setOf("0", "K", "M", "N", "L", "D", "O"),
-    "171" to setOf("0", "P"),
-    "186" to setOf("0", "M"),
-    "225" to setOf("0", "K", "M", "O"),
-    "175" to setOf("K"),
-    "256" to setOf("0", "K"),
-)
-
-// 变焦拨杆过滤表：171/225 默认过滤连续变焦(Z)
-private val ZOOM_FILTER = mapOf(
-    "0" to null,
-    "163" to setOf("0", "Y", "Z", "E", "1"),
-    "225" to setOf("0", "E", "1"),
-    "171" to setOf("0", "E"),
-    "162" to setOf("0", "Y", "Z", "E"), "167" to setOf("0", "Z"),
-    "180" to setOf("0", "Z"), "173" to setOf("0", "Y", "Z", "E"),
-    "186" to setOf("0", "Y", "Z", "E"), "175" to setOf("0", "Y", "E"),
-    "256" to setOf("0", "Y", "Z", "E"),
-)
 
 // 录像键长按功能：未设置、预览照片，以及在已反查入口的版本上可用的原生二态切换；
 // 162/180 整行默认隐藏（同超清等更多模式），开发者选项打开后展示
@@ -330,6 +266,10 @@ private fun KeyConfigScreen(key: String, title: String, resumeTick: Int, onBack:
     val isShutterKey = key == ModeConfig.KEY_SHUTTER
     val longTab = (isRecordKey && pressTab > 0) || (isShutterKey && pressTab == 1)
     val deepLongTab = isRecordKey && pressTab == 2
+    val camera68Mapping = ModeConfig.readMappingScheme(cfg) == ModeConfig.MAPPING_CAMERA_68
+    var classicRuntimeModes by remember(resumeTick, camera68Mapping, longTab) {
+        mutableStateOf(IntArray(0))
+    }
 
     LaunchedEffect(resumeTick) {
         cfg = ModeConfig.read()
@@ -367,9 +307,10 @@ private fun KeyConfigScreen(key: String, title: String, resumeTick: Int, onBack:
         CameraBuilds.isPhoenixOs4Family(it)
     } == true
 
-    /** 徕卡一瞬是 Phoenix 作者包的 module 256，官方映射方案不显示该配置行。 */
-    fun isLeicaInstantModeAvailable(): Boolean =
-        ModeConfig.isPromFixEnabled() && isPhoenixCameraVersion()
+    fun isLeicaInstantModeAvailable(): Boolean = cameraVersionCode()?.let { version ->
+        (ModeConfig.isPromFixEnabled() && CameraBuilds.isPhoenixOs4Family(version)) ||
+            (ModeConfig.isCamera68Mapping() && CameraBuilds.isCamera68Port(version))
+    } == true
 
     /**
      * “滤镜选择”按已反查的相机族开放：Phoenix OS4 使用 Prometheus 方案，官方
@@ -396,12 +337,18 @@ private fun KeyConfigScreen(key: String, title: String, resumeTick: Int, onBack:
     }
 
     /**
-     * 长按 A 的能力门：模式白名单复用短按 MODE_FILTER，版本入口再单独核对。
+     * 长按 A 的能力门：模式白名单复用短按规则，版本入口再单独核对。
      * Phoenix 的多 LUT「徕卡经典风格」与原生经典/生动二态分离；当前 0.3.0
      * 已反查 V9.i0.s9(View) + r2.m 原生链，因此可以开放 A，但不复用短按多 LUT 动作。
      */
     fun isLongLeicaAvailable(modeKey: String): Boolean {
         val mode = modeKey.toIntOrNull() ?: return false
+        if (camera68Mapping) {
+            return cameraVersionCode()?.let(CameraBuilds::isCamera68Port) == true &&
+                Camera68InputCapabilities.supportsAction(
+                    ModeConfig.KEY_RECORD, mode, ModeConfig.F_LEICA, true,
+                )
+        }
         if (!ModeConfig.isLeicaStyleMode(mode)) return false
         if (isPhoenixCameraVersion()) return true
         if (ModeConfig.isPromFixEnabled()) {
@@ -442,7 +389,7 @@ private fun KeyConfigScreen(key: String, title: String, resumeTick: Int, onBack:
     }
 
     // 经典风格还需要附带作者 LSP；参数工作台则是相机自身原生能力。
-    // 该模式集合必须与 MODE_FILTER 中的 F_PHOENIX_CLASSIC_STYLE 保持一致：前者负责
+    // 该模式集合必须与 共享录像键白名单中的 F_PHOENIX_CLASSIC_STYLE 保持一致：前者负责
     // 能力门，后者负责列表过滤。只改其中一处会出现“配置可写但选项不可见”或反之。
     fun isPhoenixClassicStyleAvailable(modeKey: String): Boolean {
         if (modeKey !in PHOENIX_CLASSIC_STYLE_MODES ||
@@ -457,6 +404,11 @@ private fun KeyConfigScreen(key: String, title: String, resumeTick: Int, onBack:
 
     /** 读取/保存风格白名单的能力门；仅显示在录像键短按页，避免与长按 A 混淆。 */
     fun isClassicStyleSelectionAvailable(): Boolean {
+        if (camera68Mapping) {
+            return isRecordKey && !longTab &&
+                cameraVersionCode()?.let { CameraBuilds.isCamera68Port(it) } == true &&
+                classicRuntimeModes.isNotEmpty()
+        }
         if (!isPhoenixCameraAvailable()) return false
         return try {
             context.packageManager.getPackageInfo(PHOENIX_CLASSIC_STYLE_LSP_PACKAGE, 0)
@@ -507,8 +459,11 @@ private fun KeyConfigScreen(key: String, title: String, resumeTick: Int, onBack:
         }
     }
 
-    LaunchedEffect(resumeTick, longTab, key) {
+    LaunchedEffect(resumeTick, longTab, key, camera68Mapping) {
         if (isRecordKey && !longTab) {
+            if (camera68Mapping) {
+                classicRuntimeModes = LspActivationMonitor.camera68ClassicModes(context)
+            }
             refreshClassicStyleCatalog()
         } else {
             classicStyleCatalog = null
@@ -531,21 +486,29 @@ private fun KeyConfigScreen(key: String, title: String, resumeTick: Int, onBack:
                 !isHoldBurstAvailable(modeKey))
     }.toTypedArray()
 
+    fun actionLabel(letter: String, label: String): String =
+        if (isRecordKey && camera68Mapping && letter == ModeConfig.F_LEICA) {
+            "摄影风格切换"
+        } else {
+            label
+        }
+
     fun funcName(letter: String): String {
-        funcs().forEach { if (it[0] == letter) return it[1] }
+        funcs().forEach { if (it[0] == letter) return actionLabel(letter, it[1]) }
         return "跟随全局设置"
     }
 
     /**
      * 长按 A 的括号字母只是开发者诊断标记，不是另一项功能。
-     * 普通用户看到稳定的“徕卡经典/生动（新）”，开启开发者选项后才显示内部码 A，
+     * 开启开发者选项后才在动作名称旁显示内部码 A，
      * 避免把功能码误认为需要额外选择的模式。
      */
     fun longFuncLabel(letter: String, baseLabel: String): String {
+        val label = actionLabel(letter, baseLabel)
         return if (letter == ModeConfig.F_LEICA && ModeConfig.isDevMode()) {
-            "$baseLabel（A）"
+            "$label（A）"
         } else {
-            baseLabel
+            label
         }
     }
 
@@ -554,7 +517,7 @@ private fun KeyConfigScreen(key: String, title: String, resumeTick: Int, onBack:
      * 不能因为用户打开了编号显示就绕过“仅开发者模式可见”的约定。
      */
     fun formatPickerLabel(letter: String, baseLabel: String): String {
-        val label = if (longTab) longFuncLabel(letter, baseLabel) else baseLabel
+        val label = if (longTab) longFuncLabel(letter, baseLabel) else actionLabel(letter, baseLabel)
         return if (showDetail && (letter != ModeConfig.F_LEICA || ModeConfig.isDevMode())) {
             "$label ($letter)"
         } else {
@@ -591,6 +554,29 @@ private fun KeyConfigScreen(key: String, title: String, resumeTick: Int, onBack:
     }
 
     fun filterFuncs(modeKey: String): Array<Array<String>> {
+        if (camera68Mapping) {
+            val version = cameraVersionCode()
+            val mode = modeKey.toIntOrNull() ?: 0
+            return activeFuncs().filter { (action) ->
+                when {
+                    version == null || !CameraBuilds.isCamera68Port(version) ->
+                        action == ModeConfig.F_DEFAULT
+                    !Camera68InputCapabilities.allowsModeAction(key, mode, action, longTab) -> false
+                    action == ModeConfig.F_DEFAULT && (longTab ||
+                        mode == Camera68InputCapabilities.EQUIP_STREET) -> true
+                    else -> when {
+                        isShutterKey && longTab ->
+                            (action == ModeConfig.F_HOLD_BURST && isHoldBurstAvailable(modeKey)) ||
+                                (action == ModeConfig.F_DUAL_STYLE_CAPTURE && isDualStyleCaptureAvailable(modeKey))
+                        action == ModeConfig.F_PHOENIX_CLASSIC_STYLE ->
+                            isClassicStyleSelectionAvailable() &&
+                                (modeKey == "preview" || mode in classicRuntimeModes)
+                        mode == Camera68InputCapabilities.EQUIP_STREET -> false
+                        else -> Camera68InputCapabilities.supportsAction(key, mode, action, longTab)
+                    }
+                }
+            }.toTypedArray()
+        }
         // 开发者选项的唯一语义是“把选择权交还给用户”：四类按键及长按页都先返回
         // 各自完整功能目录，不再经过模式表或版本能力过滤。这里只改变设置页可见性和
         // 可保存性；相机进程的 descriptor、版本、模式能力门仍决定动作是否会被消费。
@@ -611,36 +597,30 @@ private fun KeyConfigScreen(key: String, title: String, resumeTick: Int, onBack:
         }
         // 长按页的 A 必须沿用短按页的模式白名单；预览照片不受该表限制。
         if (longTab) {
-            val shortAllowed = MODE_FILTER[modeKey]
+            val shortAllowed = GripModeWhitelist.shortActions(ModeConfig.KEY_RECORD, modeKey.toIntOrNull() ?: 0)
             return if (shortAllowed == null) base else base.filter {
                 it[0] != ModeConfig.F_LEICA || shortAllowed.contains(ModeConfig.F_LEICA)
             }.toTypedArray()
         }
-        val allowed: Set<String>? = when (key) {
-            ModeConfig.KEY_RECORD -> MODE_FILTER[modeKey]
-            ModeConfig.KEY_WHEEL -> {
-                val base = WHEEL_FILTER[modeKey]
+        val allowed: Set<String>? = GripModeWhitelist.shortActions(key, modeKey.toIntOrNull() ?: 0)
+            ?.let { actions ->
                 // 版本区分：跟随 promFix 开关（与导入清洗 sanitizeForCamera 一致）。
                 // 官方相机（promFix 关）：专业拍照 167 仅在已反查的 6.4.000370/530、
                 // OS4 6.6.000510 保留 J；其它
                 // 官方版本仍过滤 J。街拍 225 继续过滤 O（官方不支持）。
                 // 夜景 173 EV 已放开（官方原生支持；PrometheusCam NRV1.5.0 起作者已适配）
-                if (base != null && !ModeConfig.isPromFixEnabled()) {
+                if (key == ModeConfig.KEY_WHEEL && !ModeConfig.isPromFixEnabled()) {
                     when (modeKey) {
                         "167" -> if (cameraVersionCode()?.let {
                             CameraBuilds.isOfficialParamPanelSupported(it)
-                        } == true) base else base - "J"
-                        "225" -> base - "O"
-                        else -> base
+                        } == true) actions else actions - ModeConfig.F_WORKSP
+                        "225" -> actions - ModeConfig.F_FOCUSP
+                        else -> actions
                     }
                 } else {
-                    base
+                    actions
                 }
             }
-            ModeConfig.KEY_SHUTTER -> SHUTTER_FILTER[modeKey]
-            ModeConfig.KEY_ZOOM -> ZOOM_FILTER[modeKey]
-            else -> null
-        }
         if (allowed == null) return base
         return base.filter { allowed.contains(it[0]) }.toTypedArray()
     }
@@ -653,7 +633,15 @@ private fun KeyConfigScreen(key: String, title: String, resumeTick: Int, onBack:
             val keys = c.optJSONObject("keys") ?: return ModeConfig.F_DEFAULT
             val k = keys.optJSONObject(key) ?: return ModeConfig.F_DEFAULT
             val v = k.optString(mode.toString(), "")
-            if (v.isNullOrEmpty()) k.optString("0", ModeConfig.F_DEFAULT) else v
+            if (camera68Mapping && isRecordKey && mode == Camera68InputCapabilities.EQUIP_STREET) {
+                return if (v == ModeConfig.F_PHOENIX_CLASSIC_STYLE) v else ModeConfig.F_DEFAULT
+            }
+            val action = if (v.isNullOrEmpty()) k.optString("0", ModeConfig.F_DEFAULT) else v
+            if (camera68Mapping && !Camera68InputCapabilities.allowsModeAction(key, mode, action, false)) {
+                ModeConfig.F_DEFAULT
+            } else {
+                action
+            }
         } catch (t: Throwable) {
             ModeConfig.F_DEFAULT
         }
@@ -810,8 +798,17 @@ private fun KeyConfigScreen(key: String, title: String, resumeTick: Int, onBack:
             }
         }
 
-    val supportedModes = MODES.filter {
-        it != MODE_LEICA_INSTANT || isLeicaInstantModeAvailable()
+    val camera68ModesAvailable = camera68Mapping &&
+        cameraVersionCode()?.let(CameraBuilds::isCamera68Port) == true
+    val supportedModes = MODES.filter { mode ->
+        when (mode) {
+            MODE_LEICA_INSTANT -> isLeicaInstantModeAvailable()
+            Camera68InputCapabilities.CINEMASTER, Camera68InputCapabilities.AI_CAPTURE ->
+                camera68ModesAvailable
+            Camera68InputCapabilities.EQUIP_STREET ->
+                camera68ModesAvailable && isRecordKey && !longTab && mode in classicRuntimeModes
+            else -> true
+        }
     }
     val baseModes = if (devMode) supportedModes
         else supportedModes.filter { !isMoreMode(it) && !(longTab && (it == 162 || it == 180)) }
@@ -951,7 +948,9 @@ private fun KeyConfigScreen(key: String, title: String, resumeTick: Int, onBack:
                             ArrowPreference(
                                 // 显示模式编号开关：打开时显示 (163)，关闭只显示名称
                                 title = if (showDetail && mode != 0) "$name ($mode)" else name,
-                                summary = rowSummary(mode),
+                                summary = if (mode == Camera68InputCapabilities.EQUIP_STREET &&
+                                    currentFunc(mode) == ModeConfig.F_DEFAULT
+                                ) "跟随街拍（225）设置" else rowSummary(mode),
                                 onClick = { pickMode = mode },
                             )
                         }
@@ -969,6 +968,10 @@ private fun KeyConfigScreen(key: String, title: String, resumeTick: Int, onBack:
             val funcs = filterFuncs(mode.toString()).map { option ->
                 if (deepLongTab && option[0] == ModeConfig.F_DEFAULT) {
                     arrayOf(option[0], "跟随短长按")
+                } else if (mode == Camera68InputCapabilities.EQUIP_STREET &&
+                    option[0] == ModeConfig.F_DEFAULT
+                ) {
+                    arrayOf(option[0], "跟随街拍（225）设置")
                 } else {
                     arrayOf(
                         option[0],
@@ -1195,8 +1198,11 @@ private fun KeyConfigScreen(key: String, title: String, resumeTick: Int, onBack:
             val sb = StringBuilder()
             // 预览与实际选择页使用同一开发者语义：开发者可查看完整目录，普通用户只看
             // 当前版本已核实能力。运行时安全门不会因为预览或保存动作而被绕过。
-            (if (ModeConfig.isDevMode()) activeFuncs()
-            else filterUnavailableCapabilities(activeFuncs(), "preview"))
+            (when {
+                camera68Mapping && !(isShutterKey && longTab) -> filterFuncs("preview")
+                ModeConfig.isDevMode() -> activeFuncs()
+                else -> filterUnavailableCapabilities(activeFuncs(), "preview")
+            })
                 .forEach {
                     // A 是内部诊断标记：普通用户的预览也不能看到它；开发者模式下
                     // 保留功能码，便于反查 JSON 与相机 dex 入口。
@@ -1206,7 +1212,7 @@ private fun KeyConfigScreen(key: String, title: String, resumeTick: Int, onBack:
                         ""
                     }
                     sb.append(code)
-                        .append(if (longTab) longFuncLabel(it[0], it[1]) else it[1])
+                        .append(if (longTab) longFuncLabel(it[0], it[1]) else actionLabel(it[0], it[1]))
                         .append("\n")
                 }
             LeftDialog(

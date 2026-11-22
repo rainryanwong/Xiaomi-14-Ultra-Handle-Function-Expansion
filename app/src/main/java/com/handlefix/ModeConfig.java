@@ -359,11 +359,34 @@ public final class ModeConfig {
         }
     }
 
-    /** 总开关：启用“Prometheus Cam 手柄修复方案”（默认开；切回系统自带相机时关闭） */
+    public static final int MAPPING_PROMETHEUS = 0;
+    public static final int MAPPING_OFFICIAL = 1;
+    public static final int MAPPING_CAMERA_68 = 2;
+    private static final String OPTION_CAMERA_68_MAPPING = "camera68Mapping";
+
+    /** Backups predating the 6.8 mapping continue to use their existing promFix value. */
+    public static int readMappingScheme(JSONObject cfg) {
+        if (cfg == null) return MAPPING_PROMETHEUS;
+        if (cfg.optBoolean(OPTION_CAMERA_68_MAPPING, false)) return MAPPING_CAMERA_68;
+        return cfg.optBoolean("promFix", true) ? MAPPING_PROMETHEUS : MAPPING_OFFICIAL;
+    }
+
+    public static void setMappingScheme(JSONObject cfg, int scheme) throws org.json.JSONException {
+        if (scheme == MAPPING_CAMERA_68) {
+            cfg.put(OPTION_CAMERA_68_MAPPING, true);
+        } else {
+            cfg.remove(OPTION_CAMERA_68_MAPPING);
+        }
+        cfg.put("promFix", scheme == MAPPING_PROMETHEUS);
+    }
+
+    public static boolean isCamera68Mapping() {
+        return readMappingScheme(cachedConfig()) == MAPPING_CAMERA_68;
+    }
+
     public static boolean isPromFixEnabled() {
         try {
-            JSONObject cfg = cachedConfig();
-            return cfg == null || cfg.optBoolean("promFix", true);
+            return readMappingScheme(cachedConfig()) == MAPPING_PROMETHEUS;
         } catch (Throwable t) {
             return true;
         }
@@ -504,7 +527,9 @@ public final class ModeConfig {
      * 只有 {@link StreetSpecialHooks} 完成 Phoenix 能力预检后，该别名才成立。</p>
      */
     public static boolean isStreetSpecialConfigAliasMode(int mode) {
-        return STREET_SPECIAL_CONFIG_ALIAS_ENABLED && mode == MODE_STREET_SPECIAL;
+        return mode == MODE_STREET_SPECIAL && (STREET_SPECIAL_CONFIG_ALIAS_ENABLED
+                || (CameraBuilds.isCamera68Port(HandleFixModule.CAMERA_VERSION_CODE)
+                    && isCamera68Mapping()));
     }
 
     /** 某按键的“启用该按键规则”开关（默认开；关闭后该按键所有模式配置失效=跟随设置页） */
@@ -632,6 +657,13 @@ public final class ModeConfig {
             if (keys == null) return F_DEFAULT;
             JSONObject keyObj = keys.optJSONObject(key);
             if (keyObj == null) return F_DEFAULT;
+            // 6.8 keeps other 229 rules on 225. Only an explicit LUT short press overrides them.
+            if (mode == MODE_STREET_SPECIAL && KEY_RECORD.equals(key)
+                    && CameraBuilds.isCamera68Port(HandleFixModule.CAMERA_VERSION_CODE)
+                    && readMappingScheme(cfg) == MAPPING_CAMERA_68
+                    && F_PHOENIX_CLASSIC_STYLE.equals(keyObj.optString(Integer.toString(mode)))) {
+                return F_PHOENIX_CLASSIC_STYLE;
+            }
             String v = keyObj.optString(String.valueOf(configModeFor(mode)), null);
             if (v == null || v.length() == 0) {
                 v = keyObj.optString("0", F_DEFAULT);
@@ -778,7 +810,7 @@ public final class ModeConfig {
 
     /** 将运行时 moduleId 转为用户配置所对应的规则键；其他相机和模式保持原样。 */
     private static int configModeFor(int mode) {
-        if (STREET_SPECIAL_CONFIG_ALIAS_ENABLED && mode == MODE_STREET_SPECIAL) {
+        if (isStreetSpecialConfigAliasMode(mode)) {
             HandleFixModule.debug("StreetSpecial config alias: runtimeMode=229 configMode=225");
             return MODE_STREET;
         }
@@ -1025,7 +1057,9 @@ public final class ModeConfig {
         } catch (Throwable ignored) {
             // 单个可选字段损坏不应阻止其它有效规则恢复；运行时读取器仍有安全默认值。
         }
-        return sanitizeForCamera(cfg, cfg.optBoolean("promFix", true));
+        int scheme = readMappingScheme(cfg);
+        return scheme == MAPPING_CAMERA_68 ? cfg
+                : sanitizeForCamera(cfg, scheme == MAPPING_PROMETHEUS);
     }
 
     /**
@@ -1247,6 +1281,10 @@ public final class ModeConfig {
     public static String getHalfFocusPolicy() {
         try {
             JSONObject cfg = cachedConfig();
+            if (cfg != null && CameraBuilds.isCamera68Port(HandleFixModule.CAMERA_VERSION_CODE)
+                    && !cfg.optBoolean("enabled", true)) {
+                return HALF_FOCUS_NATIVE;
+            }
             String value = cfg == null ? HALF_FOCUS_NATIVE
                     : cfg.optString(OPTION_HALF_FOCUS_POLICY, HALF_FOCUS_NATIVE);
             if (!HALF_FOCUS_DISABLE.equals(value) && !HALF_FOCUS_CENTER.equals(value)) {

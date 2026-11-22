@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -19,6 +20,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import com.handlefix.ModeConfig
+import com.handlefix.Camera68LaunchTargets
+import com.handlefix.activation.ActivationProbeProtocol
+import com.handlefix.activation.LspActivationMonitor
 import org.json.JSONObject
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Icon
@@ -38,14 +42,21 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /** 相机外摄影手柄快捷启动；相机前台按键语义仍由四按键配置页管理。 */
 class GripQuickLaunchActivity : ComponentActivity() {
+    private var resumeTick by mutableIntStateOf(0)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
             XiaomiEdgeToEdge()
             HandleFixTheme {
-                GripQuickLaunchScreen { finish() }
+                GripQuickLaunchScreen(resumeTick) { finish() }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        resumeTick++
     }
 }
 
@@ -71,11 +82,31 @@ private val quickTargets = listOf(
 )
 
 @Composable
-private fun GripQuickLaunchScreen(onBack: () -> Unit) {
+private fun GripQuickLaunchScreen(resumeTick: Int, onBack: () -> Unit) {
     val context = LocalContext.current
     val view = LocalView.current
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var cfg by remember { mutableStateOf(ModeConfig.read()) }
+    val camera68 = ModeConfig.readMappingScheme(cfg) == ModeConfig.MAPPING_CAMERA_68
+    var streetReady by remember(resumeTick, camera68) { mutableStateOf(false) }
+    LaunchedEffect(resumeTick, camera68) {
+        if (camera68) streetReady = LspActivationMonitor.cameraCapability(
+            context, ActivationProbeProtocol.CAMERA68_STREET_READY,
+        ) == true
+    }
+    val availableTargets = if (camera68) {
+        quickTargets.filter { Camera68LaunchTargets.supportsTarget(it.first) }.mapNotNull { target ->
+            when (target.first) {
+                ModeConfig.GRIP_QUICK_STREET_229 ->
+                    if (streetReady) target.first to "经典街拍（强制）" else null
+                ModeConfig.GRIP_QUICK_STREET_229_LEGEND ->
+                    if (streetReady) target.first to "传奇街拍（强制）" else null
+                else -> target
+            }
+        }
+    } else {
+        quickTargets
+    }
     var recordPolicy by remember { mutableStateOf(ModeConfig.readGlobalRecordVideoPolicy(cfg)) }
     var recordThreshold by remember {
         mutableIntStateOf(ModeConfig.readGlobalRecordLongPressMs(cfg))
@@ -215,6 +246,7 @@ private fun GripQuickLaunchScreen(onBack: () -> Unit) {
                             QuickTargetPreference(
                                 title = "向放大方向长拨（右）",
                                 target = zoomIn,
+                                targets = availableTargets,
                                 onChange = { value ->
                                     save { put(ModeConfig.OPTION_GRIP_QUICK_ZOOM_IN, value) }
                                 },
@@ -222,6 +254,7 @@ private fun GripQuickLaunchScreen(onBack: () -> Unit) {
                             QuickTargetPreference(
                                 title = "向缩小方向长拨（左）",
                                 target = zoomOut,
+                                targets = availableTargets,
                                 onChange = { value ->
                                     save { put(ModeConfig.OPTION_GRIP_QUICK_ZOOM_OUT, value) }
                                 },
@@ -272,13 +305,19 @@ private fun GripQuickLaunchScreen(onBack: () -> Unit) {
 }
 
 @Composable
-private fun QuickTargetPreference(title: String, target: String, onChange: (String) -> Unit) {
-    val selected = quickTargets.indexOfFirst { it.first == target }.coerceAtLeast(0)
+private fun QuickTargetPreference(
+    title: String,
+    target: String,
+    targets: List<Pair<String, String>>,
+    onChange: (String) -> Unit,
+) {
+    val selected = targets.indexOfFirst { it.first == target }.coerceAtLeast(0)
     OverlayDropdownPreference(
-        items = quickTargets.map { it.second },
+        items = targets.map { it.second },
         selectedIndex = selected,
         title = title,
-        summary = quickTargets[selected].second,
-        onSelectedIndexChange = { onChange(quickTargets[it].first) },
+        summary = if (target == targets[selected].first) targets[selected].second
+            else "已保存的目标暂不可用",
+        onSelectedIndexChange = { onChange(targets[it].first) },
     )
 }

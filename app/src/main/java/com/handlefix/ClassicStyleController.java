@@ -253,7 +253,7 @@ public final class ClassicStyleController {
         }
     }
 
-    private static List<String> configuredCandidates(long cameraVersionCode, String[] ids) {
+    static List<String> configuredCandidates(long cameraVersionCode, String[] ids) {
         List<String> all = new ArrayList<String>();
         Set<String> available = new HashSet<String>();
         for (String id : ids) {

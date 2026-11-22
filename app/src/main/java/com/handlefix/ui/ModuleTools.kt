@@ -1,37 +1,6 @@
 package com.handlefix.ui
 
 import android.content.Context
-import java.io.File
-
-/** 导出唯一内置源码快照到 Download/HandleFixConfig（需 root 写入公共目录）。 */
-internal fun exportModuleSource(context: Context, onSuccess: (String) -> Unit) {
-    UiUtil.runBg {
-        try {
-            // 版本号和源码快照可以在维护窗口解耦：发布小版本时若明确不更新源码，
-            // 仍应导出仓库中唯一、经过校验的快照，而不是动态拼出不存在的文件名。
-            val sourceArchives = context.assets.list("")?.filter {
-                it.startsWith("handlefix-src-") && it.endsWith(".zip")
-            }.orEmpty()
-            require(sourceArchives.size == 1) {
-                "内置源码快照数量异常：${sourceArchives.size}"
-            }
-            val srcName = sourceArchives.single()
-            val bytes = context.assets.open(srcName).readBytes()
-            val dir = "/sdcard/Download/HandleFixConfig"
-            UiUtil.suExec("mkdir -p $dir")
-            val tmp = File(context.cacheDir, srcName)
-            tmp.writeBytes(bytes)
-            val ok = UiUtil.suExec("cp ${tmp.absolutePath} $dir/$srcName")
-            if (ok) {
-                UiUtil.runUi { onSuccess("$dir/$srcName") }
-            } else {
-                UiUtil.runUi { UiUtil.toast(context, "导出失败：需要 root 权限", true) }
-            }
-        } catch (t: Throwable) {
-            UiUtil.runUi { UiUtil.toast(context, "导出失败：${t.message}", true) }
-        }
-    }
-}
 
 // ============ v10.23 重启检测 ============
 

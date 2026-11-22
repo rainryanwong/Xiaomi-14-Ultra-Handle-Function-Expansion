@@ -80,7 +80,8 @@ public final class EnvHooks {
                                         }
                                         long appInfoVersionCode = CameraBuilds.readVersionCode(context.getApplicationInfo());
                                         boolean phoenixOs4Family = CameraBuilds.isPhoenixOs4Family(appInfoVersionCode);
-                                        String mappingProfile = phoenixOs4Family ? "phoenix-os4"
+                                        String mappingProfile = ModeConfig.isCamera68Mapping() ? "camera68"
+                                                : phoenixOs4Family ? "phoenix-os4"
                                                 : (HandleFixModule.promFix() ? "prometheus" : "official");
                                         HandleFixModule.ENV_LOAD_LINE = "pkg=com.android.camera ver=" + packageInfo.versionName
                                                 + "(" + packageInfo.versionCode + ") appInfoVcode=" + appInfoVersionCode

@@ -21,6 +21,7 @@ import android.widget.TextView;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Method;
 import java.util.Optional;
+import java.util.function.Consumer;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -99,7 +100,7 @@ public final class PhoenixClassicStyleHooks {
      */
     private static volatile WeakReference<Object> sWorkspaceFragment = new WeakReference<>(null);
     /** 当前风格提示 Overlay；每次新按键都会立即替换它。 */
-    private static volatile View sStyleOverlay;
+    private static volatile FrameLayout sStyleOverlay;
     /** 反射入口失败时只记录一次，避免在作者 LSP 未启用时刷屏。 */
     private static volatile boolean sStyleFailureLogged;
     /** 根布局短暂重建时只记录一次提示层异常，避免快速切换污染 LSPosed 日志。 */
@@ -176,6 +177,10 @@ public final class PhoenixClassicStyleHooks {
      * 的基类描述符硬套给 NRV，否则风格虽然切换成功，提示层会因拿不到 Activity 而消失。</p>
      */
     private static void hookCameraLifecycleOnly(final ClassLoader classLoader) {
+        hookCameraLifecycleOnly(classLoader, null);
+    }
+
+    static void hookCameraLifecycleOnly(ClassLoader classLoader, Consumer<Activity> onCameraResume) {
         try {
             final Class<?> cameraClass = XposedHelpers.findClass(
                     "com.android.camera.Camera", classLoader);
@@ -190,7 +195,11 @@ public final class PhoenixClassicStyleHooks {
                             // 生命周期声明基类还可能被设置页继承；只接受真正的 Camera 实例。
                             if (cameraClass.isInstance(param.thisObject)
                                     && param.thisObject instanceof Activity) {
-                                sCameraActivity = new WeakReference<>((Activity) param.thisObject);
+                                Activity activity = (Activity) param.thisObject;
+                                sCameraActivity = new WeakReference<>(activity);
+                                if (onCameraResume != null && !param.hasThrowable()) {
+                                    onCameraResume.accept(activity);
+                                }
                             }
                         }
                     });
@@ -571,6 +580,33 @@ public final class PhoenixClassicStyleHooks {
         showStatusOverlay(message, ModeConfig.isStreetSpecialConfigAliasMode(mode));
     }
 
+    static void hookCamera68OverlayRotation(ClassLoader loader) {
+        XposedHelpers.findAndHookMethod("com.android.camera.Camera", loader, "Rs",
+                new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam param) {
+                        Activity activity = sCameraActivity.get();
+                        if (param.hasThrowable() || activity != param.thisObject
+                                || sStyleOverlay == null) return;
+                        if (Looper.myLooper() == Looper.getMainLooper()) {
+                            rotateCamera68Overlay(activity);
+                        } else {
+                            MAIN_HANDLER.post(() -> rotateCamera68Overlay(activity));
+                        }
+                    }
+                });
+    }
+
+    private static void rotateCamera68Overlay(Activity activity) {
+        FrameLayout overlay = sStyleOverlay;
+        if (activity != sCameraActivity.get() || overlay == null
+                || !(overlay.getParent() instanceof ViewGroup)) return;
+        View text = overlay.getChildAt(0);
+        int rotation = (360 - getCameraUiOrientation(activity)) % 360;
+        if (text.getRotation() != rotation) {
+            positionStyleOverlay(text, (ViewGroup) overlay.getParent(), rotation);
+        }
+    }
+
     /**
      * 在相机根视图显示轻量提示。与系统 Toast 不同，它没有应用图标、不会排队，且位置和文字
      * 都按 Phoenix 相机自己的 UI 方向变换，因此横屏拍摄时无需歪头读取。
@@ -610,7 +646,6 @@ public final class PhoenixClassicStyleHooks {
             // Phoenix 的 Rotatable 控件使用 -orientation 绘制；提示层采用同一变换，才能与
             // AUTO、LEICA 等相机原生控件保持相同阅读方向。
             int contentRotation = (360 - cameraOrientation) % 360;
-            OverlayPosition position = getOverlayPosition(root, contentRotation);
 
             FrameLayout overlay = new FrameLayout(activity);
             overlay.setClipChildren(false);
@@ -619,9 +654,8 @@ public final class PhoenixClassicStyleHooks {
             overlay.setFocusable(false);
             overlay.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
 
-            TextView text = buildStyleOverlayText(activity, message, contentRotation);
-            text.setTranslationX(position.xOffset);
-            text.setTranslationY(position.yOffset);
+            TextView text = buildStyleOverlayText(activity, message);
+            OverlayPosition position = positionStyleOverlay(text, root, contentRotation);
             overlay.addView(text, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
                     Gravity.CENTER));
@@ -656,7 +690,7 @@ public final class PhoenixClassicStyleHooks {
     }
 
     /** 创建不带 SystemUI 相机图标、不会遮挡取景的半透明文字提示。 */
-    private static TextView buildStyleOverlayText(Context context, String label, float rotationDegrees) {
+    private static TextView buildStyleOverlayText(Context context, String label) {
         TextView text = new TextView(context);
         text.setText(label);
         text.setTextColor(Color.WHITE);
@@ -670,13 +704,20 @@ public final class PhoenixClassicStyleHooks {
         int verticalPadding = dp(context, 5);
         text.setPadding(horizontalPadding, verticalPadding, horizontalPadding, verticalPadding);
         text.setShadowLayer(dp(context, 1), 0f, dp(context, 1), Color.argb(160, 0, 0, 0));
-        text.setRotation(rotationDegrees);
 
         GradientDrawable background = new GradientDrawable();
         background.setColor(Color.argb(STYLE_OVERLAY_BACKGROUND_ALPHA, 0, 0, 0));
         background.setCornerRadius(dp(context, 9));
         text.setBackground(background);
         return text;
+    }
+
+    private static OverlayPosition positionStyleOverlay(View text, View root, int rotation) {
+        OverlayPosition position = getOverlayPosition(root, rotation);
+        text.setRotation(rotation);
+        text.setTranslationX(position.xOffset);
+        text.setTranslationY(position.yOffset);
+        return position;
     }
 
     /**
@@ -717,6 +758,12 @@ public final class PhoenixClassicStyleHooks {
      * 的安全回退。</p>
      */
     private static int getCameraUiOrientation(Activity activity) {
+        if (CameraBuilds.isCamera68Port(HandleFixModule.CAMERA_VERSION_CODE)) {
+            // Camera.Rs passes this sensor-plus-display angle to the native rotation dispatcher.
+            int orientation = XposedHelpers.getIntField(activity, "j0");
+            return orientation >= 0 && orientation < 360 && orientation % 90 == 0
+                    ? orientation : 0;
+        }
         try {
             Object value = XposedHelpers.callMethod(activity, "getOrientation");
             if (value instanceof Integer) {

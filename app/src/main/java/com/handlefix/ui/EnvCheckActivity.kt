@@ -78,7 +78,11 @@ internal fun envRows(context: Context): List<Pair<String, String>> = buildList {
     val cfg: JSONObject? = ModeConfig.read()
     if (cfg != null) {
         add("模块总开关" to (if (cfg.optBoolean("enabled", true)) "开" else "关"))
-        add("Prometheus Cam 手柄映射" to (if (cfg.optBoolean("promFix", true)) "已启用（Prometheus Cam 模式）" else "已关闭（官方相机模式）"))
+        add("手柄按键映射方案" to when (ModeConfig.readMappingScheme(cfg)) {
+            ModeConfig.MAPPING_CAMERA_68 -> "6.8相机移植"
+            ModeConfig.MAPPING_OFFICIAL -> "官方相机"
+            else -> "Prometheus Cam"
+        })
         // 与主页相同的精确显示门：其它版本不展示该开关/状态，但不触碰已保存的 v51 值。
         if (cameraVersionCode == CameraBuilds.PROMETHEUS_MODULE_V51_VERSION_CODE) {
             add("旧版 Prometheus Cam 手柄适配" to (if (cfg.optBoolean("v51", false))

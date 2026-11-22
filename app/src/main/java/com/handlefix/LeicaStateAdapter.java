@@ -5,15 +5,15 @@ import android.content.Context;
 import java.lang.reflect.Field;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 
 import de.robv.android.xposed.XposedHelpers;
 
 /**
- * 经典/生动二态的只读适配器。
+ * 相机原生摄影风格状态和 6.8 的提交入口。
  *
  * <p>作者的多 LUT 目录不属于这里：{@link ClassicStyleController} 仍独立负责
- * ClassicStyleStore。此类只读取相机原生 CV_TYPE 组件，用于在用户按下多 LUT
- * 风格键时判断是否处于“徕卡生动”，以及在原生二态切换后决定是否补发当前经典风格提示。</p>
+ * ClassicStyleStore。双风格拍摄使用经典/生动状态，6.8 的录像键使用原生风格列表。</p>
  */
 public final class LeicaStateAdapter {
     public enum State { CLASSIC, VIBRANT, UNKNOWN }
@@ -25,17 +25,16 @@ public final class LeicaStateAdapter {
 
     public static State read(ClassLoader classLoader, int mode) {
         try {
-            ComponentSpec spec = componentSpec(HandleFixModule.CAMERA_VERSION_CODE);
-            Class<?> repositoryClass = XposedHelpers.findClass(spec.repositoryClass, classLoader);
-            Object repository = XposedHelpers.callStaticMethod(repositoryClass, "a");
-            Class<?> componentClass = XposedHelpers.findClass(spec.componentClass, classLoader);
-            Object component = XposedHelpers.callMethod(repository, spec.repositoryGetter,
-                    componentClass);
+            Object component = component(classLoader);
             if (component == null) {
                 return State.UNKNOWN;
             }
             Object rawValue = XposedHelpers.callMethod(component, "getComponentValue", mode);
             String raw = rawValue instanceof String ? (String) rawValue : null;
+            if (CameraBuilds.isCamera68Port(HandleFixModule.CAMERA_VERSION_CODE)) {
+                // 6.8 的 2 是原色，不能用其他标签字段把它判成经典或生动。
+                return camera68State(raw);
+            }
             State byLabel = stateFromItemLabel(component, raw);
             if (byLabel != State.UNKNOWN) {
                 return byLabel;
@@ -56,7 +55,8 @@ public final class LeicaStateAdapter {
      * 按真实 dex 描述符选择 CV 组件；JADX 为解决大小写冲突生成的包名前缀不能使用。
      */
     private static ComponentSpec componentSpec(long versionCode) {
-        if (CameraBuilds.isPhoenixOs4Family(versionCode)
+        if (CameraBuilds.isCamera68Port(versionCode)
+                || CameraBuilds.isPhoenixOs4Family(versionCode)
                 || versionCode == CameraBuilds.OFFICIAL_OS4_6_6_510_VERSION_CODE) {
             return new ComponentSpec("g2.a", "r2.m", "x");
         }
@@ -85,6 +85,103 @@ public final class LeicaStateAdapter {
 
     public static boolean isVibrant(ClassLoader classLoader, int mode) {
         return read(classLoader, mode) == State.VIBRANT;
+    }
+
+    private static State camera68State(String raw) {
+        if ("0".equals(raw)) return State.VIBRANT;
+        if ("1".equals(raw)) return State.CLASSIC;
+        return State.UNKNOWN;
+    }
+
+    /** Dual-style capture switches only between its two capture states. */
+    static boolean toggleCamera68CvType(ClassLoader loader, int mode) {
+        State current = read(loader, mode);
+        if (current == State.UNKNOWN) return false;
+        return applyCamera68CvType(loader, mode, current == State.CLASSIC ? "0" : "1");
+    }
+
+    static void cycleCamera68CvType(ClassLoader loader, int mode) {
+        try {
+            Object component = editableCamera68Component(loader, mode);
+            if (component == null) return;
+            // r2.m.m follows the native list for the active mode and lens.
+            String next = (String) XposedHelpers.callMethod(component, "m", mode);
+            if (next == null || next.equals(XposedHelpers.callMethod(
+                    component, "getComponentValue", mode))) return;
+            if (!commitCamera68CvType(loader, mode, component, next)) return;
+
+            Class<?> topBarProtocol = XposedHelpers.findClass("R6.o1", loader);
+            Optional<?> topBar = (Optional<?>) XposedHelpers.callStaticMethod(topBarProtocol, "a");
+            if (topBar.isPresent()) {
+                XposedHelpers.callMethod(topBar.get(), "X0", new int[] {190});
+            }
+        } catch (RuntimeException | LinkageError error) {
+            HandleFixModule.log("leica-state: 6.8 native CV cycle failed", error);
+        }
+    }
+
+    /**
+     * 复用 1770 的摄影风格提交协议。r6.W.qd 负责写 r2.m、处理 CamStyle 并通知当前模块。
+     * 双风格事务只接收现有列表中可选的经典/生动，保留原色和相机的互斥选择。
+     */
+    static boolean applyCamera68CvType(ClassLoader loader, int mode, String target) {
+        if (camera68State(target) == State.UNKNOWN) return false;
+        try {
+            Object component = editableCamera68Component(loader, mode);
+            if (component == null) return false;
+            Object current = XposedHelpers.callMethod(component, "getComponentValue", mode);
+            if (!(current instanceof String) || camera68State((String) current) == State.UNKNOWN) {
+                return false;
+            }
+            if (target.equals(current)) return true;
+            List<?> items = (List<?>) XposedHelpers.callMethod(component, "getItems");
+            if (items == null) return false;
+            boolean offered = false;
+            for (Object item : items) {
+                if (target.equals(XposedHelpers.getObjectField(item, "r"))) {
+                    offered = true;
+                    break;
+                }
+            }
+            if (!offered) return false;
+
+            return commitCamera68CvType(loader, mode, component, target);
+        } catch (Throwable error) {
+            HandleFixModule.log("leica-state: 6.8 native CV request failed", error);
+            return false;
+        }
+    }
+
+    private static Object component(ClassLoader loader) {
+        ComponentSpec spec = componentSpec(HandleFixModule.CAMERA_VERSION_CODE);
+        Class<?> repositoryClass = XposedHelpers.findClass(spec.repositoryClass, loader);
+        Object repository = XposedHelpers.callStaticMethod(repositoryClass, "a");
+        Class<?> componentClass = XposedHelpers.findClass(spec.componentClass, loader);
+        return XposedHelpers.callMethod(repository, spec.repositoryGetter, componentClass);
+    }
+
+    private static Object editableCamera68Component(ClassLoader loader, int mode) {
+        if (!CameraBuilds.isCamera68Port(HandleFixModule.CAMERA_VERSION_CODE)
+                || !ModeConfig.isCamera68Mapping()) return null;
+        Object component = component(loader);
+        Context context = currentApplication();
+        if (component == null || context == null
+                || Boolean.TRUE.equals(XposedHelpers.callMethod(component, "s", mode))
+                || XposedHelpers.callMethod(component, "getDisableReasonString", context) != null) {
+            return null;
+        }
+        return component;
+    }
+
+    private static boolean commitCamera68CvType(ClassLoader loader, int mode,
+            Object component, String target) {
+        Class<?> protocolType = XposedHelpers.findClass("R6.D", loader);
+        Optional<?> protocol = (Optional<?>) XposedHelpers.callStaticMethod(protocolType, "a");
+        if (!protocol.isPresent()) return false;
+        Object owner = protocol.get();
+        if (!Integer.valueOf(mode).equals(XposedHelpers.callMethod(owner, "Jc"))) return false;
+        XposedHelpers.callMethod(owner, "qd", target);
+        return target.equals(XposedHelpers.callMethod(component, "getComponentValue", mode));
     }
 
     /** 读取并显示作者当前经典风格；失败返回 null，不伪造名称。 */

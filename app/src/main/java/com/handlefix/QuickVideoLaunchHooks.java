@@ -2,7 +2,11 @@ package com.handlefix;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.hardware.camera2.CameraCaptureSession;
 
+import java.lang.ref.WeakReference;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.Map;
@@ -46,6 +50,12 @@ public final class QuickVideoLaunchHooks {
     }
 
     public static void install(final ClassLoader classLoader) {
+        if (CameraBuilds.isCamera68Port(HandleFixModule.CAMERA_VERSION_CODE)) {
+            if (android.os.Build.VERSION.SDK_INT >= 35 && ModeConfig.isCamera68Mapping()) {
+                HandleFixModule.install("camera68 quick video", () -> installCamera68(classLoader));
+            }
+            return;
+        }
         HandleFixModule.install("quick-video-native-state", new Runnable() {
             @Override
             public void run() {
@@ -186,6 +196,196 @@ public final class QuickVideoLaunchHooks {
                         + " previewReady=" + previewReadyCount + " focus=" + focusCount);
             }
         });
+    }
+
+    private static final String GRIP_RECORD_TASK = "com.handlefix.camera68.recordTask";
+
+    private static final class Camera68RecordTask {
+        final WeakReference<Object> module;
+        final Intent request;
+        final CameraCaptureSession session;
+
+        Camera68RecordTask(Object module, Intent request, CameraCaptureSession session) {
+            this.module = new WeakReference<>(module);
+            this.request = request;
+            this.session = session;
+        }
+    }
+
+    private static void installCamera68(ClassLoader loader) {
+        try {
+            Class<?> video = XposedHelpers.findClass("com.android.camera.module.VideoModule", loader);
+            Class<?> module = XposedHelpers.findClass("com.android.camera.module.u", loader);
+            Class<?> quickTask = XposedHelpers.findClass("E1.G", loader);
+            Method gate = video.getDeclaredMethod("directRecordingWhenModeChanged");
+            Method session = video.getDeclaredMethod("onPreviewSessionSuccess", CameraCaptureSession.class);
+            Method focus = video.getDeclaredMethod("onWindowFocusChanged", boolean.class);
+            Method inactive = video.getDeclaredMethod("onInactive");
+            Method shutter = video.getDeclaredMethod("onShutterButtonClick", int.class);
+            Constructor<?> taskConstructor = quickTask.getDeclaredConstructor(Object.class, int.class);
+            Method runTask = quickTask.getDeclaredMethod("run");
+            Method getActivity = module.getMethod("getActivity");
+            Method getModuleIndex = module.getMethod("getModuleIndex");
+            Method alive = module.getMethod("isDeviceAndModuleAlive");
+            Method recording = video.getMethod("isRecording");
+            Field startingFocusRecording = module.getDeclaredField("mInStartingFocusRecording");
+            Field quickVideo = video.getDeclaredField("mQuickVideo");
+            if (gate.getReturnType() != boolean.class || quickVideo.getType() != boolean.class
+                    || getModuleIndex.getReturnType() != int.class || runTask.getReturnType() != void.class
+                    || shutter.getReturnType() != boolean.class || alive.getReturnType() != boolean.class
+                    || recording.getReturnType() != boolean.class
+                    || startingFocusRecording.getType() != boolean.class) {
+                throw new ReflectiveOperationException("unexpected VideoModule method/field types");
+            }
+            gate.setAccessible(true);
+            quickVideo.setAccessible(true);
+            startingFocusRecording.setAccessible(true);
+            Map<Object, Camera68RecordTask> ready = new WeakHashMap<>();
+            ThreadLocal<Camera68RecordTask> scheduling = new ThreadLocal<>();
+
+            XposedBridge.hookMethod(taskConstructor, new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    Camera68RecordTask task = scheduling.get();
+                    // In stock 1770 this constructor's case 7 invokes the delayed video shutter.
+                    if (!param.hasThrowable() && task != null && task.module.get() == param.args[0]
+                            && Integer.valueOf(7).equals(param.args[1])) {
+                        XposedHelpers.setAdditionalInstanceField(param.thisObject, GRIP_RECORD_TASK, task);
+                    }
+                }
+            });
+
+            XposedBridge.hookMethod(runTask, new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    Object recordTask = XposedHelpers.getAdditionalInstanceField(
+                            param.thisObject, GRIP_RECORD_TASK);
+                    if (!(recordTask instanceof Camera68RecordTask)) return;
+                    Camera68RecordTask task = (Camera68RecordTask) recordTask;
+                    Object videoModule = task.module.get();
+                    synchronized (ready) {
+                        if (videoModule == null || ready.get(videoModule) != task) {
+                            param.setResult(null);
+                            return;
+                        }
+                        ready.remove(videoModule);
+                    }
+                    boolean pending = Camera68QuickLaunchHooks.isTrustedRecordRequest(task.request);
+                    Camera68QuickLaunchHooks.consumeRecordRequest(task.request);
+                    try {
+                        Activity owner = (Activity) getActivity.invoke(videoModule);
+                        if (pending && ModeConfig.isCamera68Mapping()
+                                && ModeConfig.GLOBAL_RECORD_START.equals(ModeConfig.getGlobalRecordVideoPolicy())
+                                && owner != null && !owner.isFinishing() && !owner.isDestroyed()
+                                && owner.getIntent() == task.request && owner.hasWindowFocus()
+                                && (Integer) getModuleIndex.invoke(videoModule) == 162
+                                && Boolean.TRUE.equals(alive.invoke(videoModule))
+                                && !Boolean.TRUE.equals(recording.invoke(videoModule))
+                                && !startingFocusRecording.getBoolean(videoModule)) return;
+                    } catch (ReflectiveOperationException | RuntimeException failure) {
+                        HandleFixModule.log("camera68 quick video: could not validate delayed request", failure);
+                    }
+                    param.setResult(null);
+                    HandleFixModule.debug("camera68 quick video: delayed request canceled");
+                }
+            });
+
+            XC_MethodHook cancelRequest = new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param) {
+                    Camera68RecordTask superseded;
+                    synchronized (ready) {
+                        superseded = ready.remove(param.thisObject);
+                    }
+                    if (superseded != null) {
+                        // Manual shutter input or leaving the module supersedes automatic start.
+                        Camera68QuickLaunchHooks.consumeRecordRequest(superseded.request);
+                    }
+                }
+            };
+            XposedBridge.hookMethod(shutter, cancelRequest);
+            XposedBridge.hookMethod(inactive, cancelRequest);
+
+            XposedBridge.hookMethod(gate, new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam param)
+                        throws ReflectiveOperationException {
+                    Activity owner = (Activity) getActivity.invoke(param.thisObject);
+                    if (owner == null || !owner.hasWindowFocus()
+                            || (Integer) getModuleIndex.invoke(param.thisObject) != 162
+                            || !Boolean.TRUE.equals(alive.invoke(param.thisObject))
+                            || !ModeConfig.isCamera68Mapping()) return;
+                    Intent request = owner.getIntent();
+                    Camera68RecordTask task;
+                    synchronized (ready) {
+                        task = ready.get(param.thisObject);
+                    }
+                    if (task == null || task.request != request) return;
+                    if (!Camera68QuickLaunchHooks.isTrustedRecordRequest(request)) return;
+                    if (!Camera68QuickLaunchHooks.beginRecordRequest(request)) {
+                        // 预览和窗口回调可能同时抵达；同一请求只允许一个 gate 调用开录。
+                        param.setResult(Boolean.FALSE);
+                        return;
+                    }
+
+                    // 目标 native gate 只读取 mQuickVideo 并交给相机调度。只在这次调用中
+                    // 补入该字段，普通预览/其他 Intent 不会继承本次自动录像。
+                    param.setObjectExtra("handlefix.68.previousQuickVideo",
+                            quickVideo.getBoolean(param.thisObject));
+                    param.setObjectExtra("handlefix.68.recordIntent", request);
+                    param.setObjectExtra("handlefix.68.previousSchedule", scheduling.get());
+                    scheduling.set(task);
+                    quickVideo.setBoolean(param.thisObject, true);
+                }
+
+                @Override protected void afterHookedMethod(MethodHookParam param)
+                        throws IllegalAccessException {
+                    Intent request = (Intent) param.getObjectExtra("handlefix.68.recordIntent");
+                    if (request == null) return;
+                    Camera68RecordTask previous = (Camera68RecordTask)
+                            param.getObjectExtra("handlefix.68.previousSchedule");
+                    if (previous == null) scheduling.remove();
+                    else scheduling.set(previous);
+                    quickVideo.setBoolean(param.thisObject,
+                            (Boolean) param.getObjectExtra("handlefix.68.previousQuickVideo"));
+                    if (param.hasThrowable() || !Boolean.TRUE.equals(param.getResult())) {
+                        Camera68QuickLaunchHooks.deferRecordRequest(request);
+                    }
+                }
+            });
+
+            XposedBridge.hookMethod(session, new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param)
+                        throws ReflectiveOperationException {
+                    if (param.hasThrowable()) return;
+                    Activity owner = (Activity) getActivity.invoke(param.thisObject);
+                    if (owner == null || (Integer) getModuleIndex.invoke(param.thisObject) != 162
+                            || !Boolean.TRUE.equals(alive.invoke(param.thisObject))) return;
+                    Intent request = owner.getIntent();
+                    if (!Camera68QuickLaunchHooks.isTrustedRecordRequest(request)) return;
+                    CameraCaptureSession preview = (CameraCaptureSession) param.args[0];
+                    if (preview == null) return;
+                    synchronized (ready) {
+                        Camera68RecordTask previous = ready.get(param.thisObject);
+                        if (previous == null || previous.request != request || previous.session != preview) {
+                            if (previous != null && previous.request == request) {
+                                Camera68QuickLaunchHooks.deferRecordRequest(request);
+                            }
+                            ready.put(param.thisObject, new Camera68RecordTask(param.thisObject, request, preview));
+                        }
+                    }
+                    if (owner.hasWindowFocus()) gate.invoke(param.thisObject);
+                }
+            });
+            XposedBridge.hookMethod(focus, new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param)
+                        throws ReflectiveOperationException {
+                    if (param.hasThrowable() || !Boolean.TRUE.equals(param.args[0])) return;
+                    synchronized (ready) {
+                        if (!ready.containsKey(param.thisObject)) return;
+                    }
+                    gate.invoke(param.thisObject);
+                }
+            });
+        } catch (ReflectiveOperationException error) {
+            throw new IllegalStateException("Camera 6.8 quick-video descriptors", error);
+        }
     }
 
     private static void markPreviewReady(Object videoModule) {

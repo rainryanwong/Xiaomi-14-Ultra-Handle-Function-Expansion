@@ -4,10 +4,8 @@ plugins {
     id("org.jetbrains.compose")
 }
 
-// 12.1.50 正式版：Phoenix 相机外快捷跳转统一在启动前清理旧相机任务，
-// 修复息屏/锁屏时首次长拨只振动、需要第二次操作才显示目标模式的问题。
-val handleFixVersionName = "12.1.50"
-val handleFixVersionCode = 1358
+val handleFixVersionName = "13.0.0"
+val handleFixVersionCode = 1359
 
 android {
     namespace = "com.handlefix.all"
@@ -48,7 +46,9 @@ android {
             signingConfig = signingConfigs.getByName("release")
         }
         debug {
-            signingConfig = signingConfigs.getByName("release")
+            if (file("../debug.keystore").isFile) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
@@ -63,35 +63,6 @@ android {
         }
     }
 
-}
-
-/**
- * 内置源码按版本导出。Release 构建只允许存在一个当前版本 ZIP，避免旧源码包继续被
- * mergeReleaseAssets 打进 APK，造成每次发布无意义地增加约 3 MB。
- */
-val verifySingleSourceArchive = tasks.register("verifySingleSourceArchive") {
-    group = "verification"
-    description = "Verify that release assets contain only the current HandleFix source archive"
-    doLast {
-        val sourceAssets = file("src/main/assets")
-        val archives = sourceAssets.listFiles { file ->
-            file.isFile && file.name.startsWith("handlefix-src-") && file.extension == "zip"
-        }?.toList().orEmpty()
-        val expectedName = "handlefix-src-12.1.50.zip"
-        if (archives.size != 1 || archives.single().name != expectedName) {
-            throw GradleException(
-                "Release assets must contain only $expectedName; found: " +
-                    archives.joinToString { it.name },
-            )
-        }
-    }
-
-}
-
-tasks.configureEach {
-    if (name == "mergeReleaseAssets") {
-        dependsOn(verifySingleSourceArchive)
-    }
 }
 
 dependencies {

@@ -140,7 +140,8 @@ private fun MainScreen(resumeTick: Int) {
 
     var cfg by remember { mutableStateOf(ModeConfig.read()) }
     var master by remember { mutableStateOf(cfg?.optBoolean("enabled", true) ?: true) }
-    var promFix by remember { mutableStateOf(cfg?.optBoolean("promFix", true) ?: true) }
+    var mappingScheme by remember { mutableStateOf(ModeConfig.readMappingScheme(cfg)) }
+    val promFix = mappingScheme == ModeConfig.MAPPING_PROMETHEUS
     var v51 by remember { mutableStateOf(cfg?.optBoolean("v51", false) ?: false) }
     var cameraVersionCode by remember { mutableStateOf(readInstalledCameraVersionCode(context)) }
     var dev by remember { mutableStateOf(cfg?.optBoolean("devMode", false) ?: false) }
@@ -167,7 +168,6 @@ private fun MainScreen(resumeTick: Int) {
     var showHelpDialog by remember { mutableStateOf(false) }
     var showVersionDialog by remember { mutableStateOf(false) }
     var showChangelogDialog by remember { mutableStateOf(false) }
-    var sourceExportPath by remember { mutableStateOf<String?>(null) }
     var showResetDialog by remember { mutableStateOf(false) }
     var showBackupConfirm by remember { mutableStateOf(false) }
     var backupResult by remember { mutableStateOf<String?>(null) }
@@ -186,7 +186,7 @@ private fun MainScreen(resumeTick: Int) {
         ThemePreference.sync(cfg)
         cameraVersionCode = readInstalledCameraVersionCode(context)
         master = cfg?.optBoolean("enabled", true) ?: true
-        promFix = cfg?.optBoolean("promFix", true) ?: true
+        mappingScheme = ModeConfig.readMappingScheme(cfg)
         v51 = cfg?.optBoolean("v51", false) ?: false
         dev = cfg?.optBoolean("devMode", false) ?: false
         streetSpecial = cfg?.optBoolean(ModeConfig.OPTION_STREET_SPECIAL, false) ?: false
@@ -243,11 +243,11 @@ private fun MainScreen(resumeTick: Int) {
     val showV51Adapter = promFix
             && cameraVersionCode == CameraBuilds.PROMETHEUS_MODULE_V51_VERSION_CODE
 
-    // 临时发布门限：当前快捷跳转的精确模式路由只完成了 PrometheusCam + Phoenix
-    // 版本组实机验收。入口保留但置灰，既不误导其它相机族，也不删除用户已保存配置；
-    // 后续为官方相机和 NRV/V5.1 补齐各自路由适配时，只需移除此 UI 门限。
-    val quickLaunchAvailable = promFix
-            && cameraVersionCode?.let(CameraBuilds::isPhoenixOs4Family) == true
+    val quickLaunchAvailable = cameraVersionCode?.let { version ->
+        (promFix && CameraBuilds.isPhoenixOs4Family(version)) ||
+                (mappingScheme == ModeConfig.MAPPING_CAMERA_68 && android.os.Build.VERSION.SDK_INT >= 35 &&
+                    CameraBuilds.isCamera68Port(version))
+    } == true
 
     // ===== 界面毛玻璃（v10.54 起默认启用，无开关）：顶栏/底栏毛玻璃 =====
     val pageBg = MiuixTheme.colorScheme.surface
@@ -349,31 +349,32 @@ private fun MainScreen(resumeTick: Int) {
                                     },
                                 )
                                 OverlayDropdownPreference(
-                                    items = listOf("Prometheus Cam", "官方相机"),
-                                    selectedIndex = if (promFix) 0 else 1,
+                                    items = listOf("Prometheus Cam", "官方相机", "6.8相机移植"),
+                                    selectedIndex = mappingScheme,
                                     title = "手柄按键映射方案",
                                     onSelectedIndexChange = { idx ->
-                                        val c = idx == 0
-                                        promFix = c
-                                        ensureCfg().put("promFix", c)
-                                        // 关闭 Prometheus Cam 手柄映射时，街拍能力门仍按原规则关闭；
-                                        // v51 只因当前映射/相机版本不适用而隐藏，不删除其已保存值。
-                                        if (!c) {
-                                            streetSpecial = false
-                                            ensureCfg().put(ModeConfig.OPTION_STREET_SPECIAL, false)
-                                            streetWithoutGrip = false
-                                            ensureCfg().put(ModeConfig.OPTION_STREET_SPECIAL_WITHOUT_GRIP, false)
-                                            // 切到官方相机模式时清洗：移植包独有的 167 J(工作区)/225 O(对焦位置)
-                                            // 官方不支持，清为跟随设置页（与导入清洗一致）
-                                            ModeConfig.sanitizeForCamera(ensureCfg(), false)
-                                        } else {
-                                            // 切回移植包模式时清洗：官方模式下可选的夜景173 EV(K)
-                                            // 移植包不支持，清为跟随设置页（与导入清洗一致）
-                                            ModeConfig.sanitizeForCamera(ensureCfg(), true)
+                                        val updated = JSONObject(ensureCfg().toString())
+                                        ModeConfig.setMappingScheme(updated, idx)
+                                        if (idx == ModeConfig.MAPPING_OFFICIAL) {
+                                            updated.put(ModeConfig.OPTION_STREET_SPECIAL, false)
+                                            updated.put(ModeConfig.OPTION_STREET_SPECIAL_WITHOUT_GRIP, false)
                                         }
-                                        save()
+                                        if (idx != ModeConfig.MAPPING_CAMERA_68) {
+                                            ModeConfig.sanitizeForCamera(
+                                                updated, idx == ModeConfig.MAPPING_PROMETHEUS,
+                                            )
+                                        }
+                                        if (ModeConfig.writeViaRoot(updated)) {
+                                            cfg = updated
+                                            mappingScheme = idx
+                                            streetSpecial = updated.optBoolean(ModeConfig.OPTION_STREET_SPECIAL)
+                                            streetWithoutGrip = updated.optBoolean(ModeConfig.OPTION_STREET_SPECIAL_WITHOUT_GRIP)
+                                            UiUtil.stopCameraQuiet()
+                                            UiUtil.toast(context, "已保存，重新打开相机生效")
+                                        } else {
+                                            UiUtil.toast(context, "保存失败：需要 root 权限（KernelSU/Magisk）", true)
+                                        }
                                         UiUtil.hapticClick(view)
-                                        UiUtil.forceStopCamera(context, c)
                                     },
                                 )
                                 // 旧版开关只对模块版 V5.1 内嵌的 V5.0 相机显示；其它版本
@@ -584,9 +585,16 @@ private fun MainScreen(resumeTick: Int) {
                                     },
                                 )
                                 ArrowPreference(
-                                    title = "模块构建源码",
-                                    summary = "导出当前版本内置的模块源码",
-                                    onClick = { exportModuleSource(context) { path -> sourceExportPath = path } },
+                                    title = "本模块项目地址",
+                                    summary = "点击跳转至本项目GitHub链接",
+                                    onClick = {
+                                        val repository = Uri.parse("https://github.com/rainryanwong/Xiaomi-14-Ultra-Handle-Function-Expansion")
+                                        try {
+                                            context.startActivity(Intent(Intent.ACTION_VIEW, repository))
+                                        } catch (_: android.content.ActivityNotFoundException) {
+                                            UiUtil.toast(context, "未找到可以打开 GitHub 链接的应用")
+                                        }
+                                    },
                                 )
                                 ArrowPreference(
                                     title = "更新日志",
@@ -725,7 +733,7 @@ private fun MainScreen(resumeTick: Int) {
                             put("keys", JSONObject())
                         }
                         master = true
-                        promFix = true
+                        mappingScheme = ModeConfig.MAPPING_PROMETHEUS
                         v51 = false
                         dev = false
                         showDetail = false
@@ -766,22 +774,10 @@ private fun MainScreen(resumeTick: Int) {
             LeftDialog(
                 show = true,
                 title = "适配版本",
-                text = "Prometheus Cam适配版本：模块版 V5.1（内嵌 V5.0 相机）；NRV-1.3.2；NRV-1.5.0；NRV-1.6.1；Phoenix-0.3.0 及同一版本组（基于 HyperOS 4.0 6.6.000510.0）\n\n官方相机版本（HyperOS 3.0）：6.4.000370.0；6.4.000530.0\nHyperOS 4.0：6.6.000510.0",
+                text = "Prometheus Cam适配版本：模块版 V5.1（内嵌 V5.0 相机）；NRV-1.3.2；NRV-1.5.0；NRV-1.6.1；Phoenix-0.3.0 及同一版本组（基于 HyperOS 4.0 6.6.000510.0）\n\n官方相机版本（HyperOS 3.0）：6.4.000370.0；6.4.000530.0\nHyperOS 4.0：6.6.000510.0\n\n6.8相机移植（小米18Pro系列相机，HyperOS 4.0）：6.8.001770.0",
                 onDismissRequest = { showVersionDialog = false },
             ) {
                 DialogButtons(confirm = "确定", onConfirm = { showVersionDialog = false })
-            }
-        }
-
-        // 模块源码导出成功弹窗
-        sourceExportPath?.let { path ->
-            LeftDialog(
-                show = true,
-                title = "导出成功",
-                text = "模块源码导出成功，请到：\n$path\n查看",
-                onDismissRequest = { sourceExportPath = null },
-            ) {
-                DialogButtons(confirm = "确定", onConfirm = { sourceExportPath = null })
             }
         }
 

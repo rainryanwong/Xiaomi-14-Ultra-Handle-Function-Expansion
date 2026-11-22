@@ -36,6 +36,10 @@ public final class CameraCapabilityRegistry {
      */
     public static boolean supportsDualStyleCapture(long versionCode,
             boolean prometheusProfile, int mode) {
+        if (CameraBuilds.isCamera68Port(versionCode)) {
+            return ModeConfig.isCamera68Mapping()
+                    && (mode == ModeConfig.MODE_CAPTURE || mode == ModeConfig.MODE_STREET);
+        }
         if (!ModeConfig.isLeicaStyleMode(mode)) {
             return false;
         }
@@ -67,6 +71,10 @@ public final class CameraCapabilityRegistry {
      */
     public static boolean supportsHoldBurst(long versionCode,
             boolean prometheusProfile, int mode) {
+        if (CameraBuilds.isCamera68Port(versionCode)) {
+            return ModeConfig.isCamera68Mapping()
+                    && (mode == ModeConfig.MODE_CAPTURE || mode == ModeConfig.MODE_STREET);
+        }
         return (mode == ModeConfig.MODE_CAPTURE || mode == ModeConfig.MODE_STREET)
                 && CameraBuilds.isModernHoldBurstCandidate(versionCode, prometheusProfile);
     }

@@ -50,6 +50,9 @@ public final class ClassicStyleCatalogBridge {
      * LSPosed 环境不会把 Xposed 运行库暴露给模块自身进程。</p>
      */
     public static String profileForVersion(long cameraVersionCode) {
+        if (CameraBuilds.isCamera68Port(cameraVersionCode)) {
+            return "camera68-001770";
+        }
         if (cameraVersionCode == CameraBuilds.PHOENIX_030_VERSION_CODE) {
             return "phoenix-030";
         }

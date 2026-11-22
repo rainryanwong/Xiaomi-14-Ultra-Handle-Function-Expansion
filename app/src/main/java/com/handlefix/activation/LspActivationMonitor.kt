@@ -30,23 +30,49 @@ object LspActivationMonitor {
     suspend fun check(context: Context) {
         val attempt = ++generation
         mutableState.value = Status.CHECKING
+        val loaded = request(context, arrayOf("android", "com.android.camera")) { _, _ ->
+            attempt == generation
+        } != null
+        if (attempt == generation) {
+            mutableState.value = if (loaded) Status.ACTIVE else Status.UNKNOWN
+            if (!loaded) Log.i("HandleFixActivation", "Live probe unconfirmed; settings remain accessible")
+        }
+    }
+
+    suspend fun cameraCapability(context: Context, key: String): Boolean? =
+        request(context, arrayOf("com.android.camera")) { scope, result ->
+            scope == "com.android.camera" && result.containsKey(key)
+        }?.getBoolean(key)
+
+    suspend fun camera68ClassicModes(context: Context): IntArray =
+        request(context, arrayOf("com.android.camera")) { scope, result ->
+            scope == "com.android.camera" &&
+                result.containsKey(ActivationProbeProtocol.CAMERA68_CLASSIC_MODES)
+        }?.getIntArray(ActivationProbeProtocol.CAMERA68_CLASSIC_MODES) ?: intArrayOf()
+
+    private suspend fun request(
+        context: Context,
+        targets: Array<String>,
+        accept: (String, Bundle) -> Boolean,
+    ): Bundle? {
         val nonce = UUID.randomUUID().toString()
-        val loaded = withTimeoutOrNull(2000) {
-            suspendCancellableCoroutine<Boolean> { continuation ->
+        return withTimeoutOrNull(2000) {
+            suspendCancellableCoroutine { continuation ->
                 val receiver = object : ResultReceiver(Handler(Looper.getMainLooper())) {
                     override fun onReceiveResult(code: Int, data: Bundle?) {
-                        if (!continuation.isActive || attempt != generation || code != 1) return
+                        if (!continuation.isActive || code != 1) return
                         if (data?.getString("nonce") != nonce
                             || data.getInt("version") != BuildConfig.VERSION_CODE) return
                         val scope = data.getString("scope")
                         if (scope != "android" && scope != "com.android.camera") return
+                        if (!accept(scope, data)) return
                         Log.i("HandleFixActivation", "Live probe accepted scope=$scope version=${BuildConfig.VERSION_CODE}")
-                        continuation.resume(true)
+                        continuation.resume(data)
                     }
                 }
                 // Explicit delivery reaches existing receivers only. Never launch camera,
                 // request Root, alter scope, or use an old camera environment record.
-                for (target in arrayOf("android", "com.android.camera")) {
+                for (target in targets) {
                     try {
                         context.sendBroadcast(Intent(ActivationProbeProtocol.ACTION).setPackage(target)
                             .putExtra("nonce", nonce).putExtra("reply", receiver))
@@ -55,10 +81,6 @@ object LspActivationMonitor {
                     }
                 }
             }
-        } == true
-        if (attempt == generation) {
-            mutableState.value = if (loaded) Status.ACTIVE else Status.UNKNOWN
-            if (!loaded) Log.i("HandleFixActivation", "Live probe unconfirmed; settings remain accessible")
         }
     }
 }

@@ -8,6 +8,7 @@
     <!-- Android 11+ 包可见性：配置页需精确读取已安装相机版本，决定是否显示 Phoenix 专属动作。 -->
     <queries>
         <package android:name="com.android.camera" />
+        <package android:name="com.aurora.camera.compat" />
         <package android:name="com.prometheus.camera.rev" />
     </queries>
 

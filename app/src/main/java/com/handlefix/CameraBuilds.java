@@ -14,6 +14,13 @@ import de.robv.android.xposed.XposedHelpers;
 public final class CameraBuilds {
     public static final long UNKNOWN_VERSION_CODE = -1L;
 
+    /** 6.8.001770.0 used by the Aurora camera port. */
+    public static final long CAMERA_68_1770_VERSION_CODE = 680017700L;
+
+    public static boolean isCamera68Port(long versionCode) {
+        return versionCode == CAMERA_68_1770_VERSION_CODE;
+    }
+
     /** Phoenix-0.3.0（6.6.000510.0 基线）实机 APK 的 versionCode。 */
     public static final long PHOENIX_030_VERSION_CODE = 760000300L;
 

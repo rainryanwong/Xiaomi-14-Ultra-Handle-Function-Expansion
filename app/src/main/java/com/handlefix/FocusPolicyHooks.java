@@ -57,10 +57,131 @@ public final class FocusPolicyHooks {
         HandleFixModule.install("focus-policy", new Runnable() {
             @Override
             public void run() {
+                if (CameraBuilds.isCamera68Port(HandleFixModule.CAMERA_VERSION_CODE)) {
+                    hookCamera68Focus(classLoader);
+                    return;
+                }
                 hookCameraKeyEntry(classLoader);
                 hookCenterFocusEntries(classLoader);
             }
         });
+    }
+
+    private static final ThreadLocal<KeyEvent> CAMERA68_FOCUS_KEY = new ThreadLocal<>();
+    private static final String CAMERA68_PREVIOUS_KEY = "handlefix.68.focus.previous";
+    private static final String CAMERA68_CENTER_PRESS = "handlefix.68.focus.press";
+
+    /** 6.8 相机模块已提供原生半按修复。只在用户选择中心/禁用时接管对应事件。 */
+    private static void hookCamera68Focus(ClassLoader loader) {
+        Class<?> camera = XposedHelpers.findClass("com.android.camera.Camera", loader);
+        Class<?> module = XposedHelpers.findClass("com.android.camera.module.u", loader);
+        Class<?> manager = XposedHelpers.findClass("k6.k", loader);
+        Class<?> focus = XposedHelpers.findClass("v6.q", loader);
+        Method keyDown = XposedHelpers.findMethodExact(camera, "onKeyDown", int.class, KeyEvent.class);
+        Method keyUp = XposedHelpers.findMethodExact(camera, "onKeyUp", int.class, KeyEvent.class);
+        Method lock = XposedHelpers.findMethodExact(module, "handleLockFocus");
+        Method getManager = XposedHelpers.findMethodExact(module, "getCameraManager");
+        Method notify = XposedHelpers.findMethodExact(module, "notifyFocusAreaUpdate", boolean.class);
+        Method alive = XposedHelpers.findMethodExact(module, "isDeviceAndModuleAlive");
+        Method canFocus = XposedHelpers.findMethodExact(manager, "a1");
+        Method getFocus = XposedHelpers.findMethodExact(manager, "p0");
+        Method focusMode = XposedHelpers.findMethodExact(focus, "getFocusMode");
+        Method setCenter = XposedHelpers.findMethodExact(focus, "j0");
+        Method startFocus = XposedHelpers.findMethodExact(focus, "l0", int.class);
+
+        XC_MethodHook keyScope = new XC_MethodHook(XC_MethodHook.PRIORITY_HIGHEST) {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                param.setObjectExtra(CAMERA68_PREVIOUS_KEY, CAMERA68_FOCUS_KEY.get());
+                CAMERA68_FOCUS_KEY.remove();
+                KeyEvent event = findKeyEvent(param);
+                if (!ModeConfig.isCamera68Mapping() || !isPhotographyHandleFocusEvent(event)) {
+                    return;
+                }
+                String policy = ModeConfig.getHalfFocusPolicy();
+                if (ModeConfig.HALF_FOCUS_DISABLE.equals(policy)) {
+                    param.setResult(true);
+                } else if (ModeConfig.HALF_FOCUS_CENTER.equals(policy)) {
+                    CAMERA68_FOCUS_KEY.set(event);
+                }
+            }
+
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                KeyEvent previous = (KeyEvent) param.getObjectExtra(CAMERA68_PREVIOUS_KEY);
+                if (previous == null) CAMERA68_FOCUS_KEY.remove();
+                else CAMERA68_FOCUS_KEY.set(previous);
+            }
+        };
+        XposedBridge.hookMethod(keyDown, keyScope);
+        XposedBridge.hookMethod(keyUp, keyScope);
+
+        XposedBridge.hookMethod(lock, new XC_MethodHook(XC_MethodHook.PRIORITY_HIGHEST) {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                KeyEvent event = CAMERA68_FOCUS_KEY.get();
+                if (event == null || event.getAction() != KeyEvent.ACTION_DOWN
+                        || event.getRepeatCount() != 0) return;
+                Object owner = param.thisObject;
+                XposedHelpers.removeAdditionalInstanceField(owner, CAMERA68_CENTER_PRESS);
+                if (!Boolean.TRUE.equals(alive.invoke(owner))) return;
+                Object cameraManager = getManager.invoke(owner);
+                if (!Boolean.TRUE.equals(canFocus.invoke(cameraManager))) return;
+                Object focusManager = getFocus.invoke(cameraManager);
+                if (!focus.isInstance(focusManager)) return;
+                int afMode = (Integer) focusMode.invoke(focusManager);
+                if (afMode == 0 || afMode == 5) return;
+
+                // j0 建立中心区域并更新原生框，l0 负责发起 AF 和管理完成/超时。
+                setCenter.invoke(focusManager);
+                notify.invoke(owner, false);
+                startFocus.invoke(focusManager, 0);
+                XposedHelpers.setAdditionalInstanceField(owner, CAMERA68_CENTER_PRESS,
+                        new Camera68Press(event));
+                param.setResult(null);
+            }
+        });
+        XC_MethodHook release = new XC_MethodHook(XC_MethodHook.PRIORITY_HIGHEST) {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) {
+                KeyEvent event = CAMERA68_FOCUS_KEY.get();
+                if (event == null || event.getAction() != KeyEvent.ACTION_UP || event.isCanceled()
+                        || !Boolean.TRUE.equals(param.args[0])) return;
+                Object press = XposedHelpers.getAdditionalInstanceField(
+                        param.thisObject, CAMERA68_CENTER_PRESS);
+                if (press instanceof Camera68Press && ((Camera68Press) press).matches(event)) {
+                    // 只移除本次松键同步的立即 AF_CANCEL。相机仍清除按钮状态，AF 自行完成。
+                    XposedHelpers.removeAdditionalInstanceField(param.thisObject, CAMERA68_CENTER_PRESS);
+                    param.setResult(null);
+                }
+            }
+        };
+        XposedBridge.hookMethod(XposedHelpers.findMethodExact(module, "cancelFocus", boolean.class),
+                release);
+        for (String owner : new String[]{
+                "com.android.camera.module.VideoBase",
+                "com.android.camera.features.mode.street.StreetModule",
+                "com.xiaomi.camera.module.PhotoBase",
+                "com.xiaomi.microfilm.dualcam.mode.DualVideoModuleBase"
+        }) {
+            Method cancel = XposedHelpers.findMethodExact(
+                    XposedHelpers.findClass(owner, loader), "cancelFocus", boolean.class);
+            XposedBridge.hookMethod(cancel, release);
+        }
+    }
+
+    private static final class Camera68Press {
+        private final int device;
+        private final long downTime;
+
+        Camera68Press(KeyEvent event) {
+            device = event.getDeviceId();
+            downTime = event.getDownTime();
+        }
+
+        boolean matches(KeyEvent event) {
+            return device == event.getDeviceId() && downTime == event.getDownTime();
+        }
     }
 
     private static void hookCameraKeyEntry(ClassLoader classLoader) {

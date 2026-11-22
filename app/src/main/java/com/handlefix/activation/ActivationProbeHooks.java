@@ -7,6 +7,8 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.os.Bundle;
 import android.os.ResultReceiver;
+import com.handlefix.Camera68ClassicStyleHooks;
+import com.handlefix.Camera68QuickLaunchHooks;
 import com.handlefix.all.BuildConfig;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -44,7 +46,7 @@ public final class ActivationProbeHooks {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     if (param.hasThrowable()) return;
                     try {
-                        register((Context) param.args[0], scope);
+                        register((Context) param.args[0], scope, loader);
                     } catch (RuntimeException error) {
                         XposedBridge.log("[HandleFixActivation] register failed scope=" + scope + " " + error);
                     }
@@ -64,7 +66,7 @@ public final class ActivationProbeHooks {
         }
     }
 
-    private static synchronized void register(Context context, String scope) {
+    private static synchronized void register(Context context, String scope, ClassLoader loader) {
         if (registered || !scope.equals(context.getPackageName())) return;
         context.registerReceiver(new BroadcastReceiver() {
             @Override public void onReceive(Context ignored, Intent intent) {
@@ -77,6 +79,13 @@ public final class ActivationProbeHooks {
                     result.putString("nonce", nonce);
                     result.putInt("version", BuildConfig.VERSION_CODE);
                     result.putString("scope", scope);
+                    if ("com.android.camera".equals(scope)
+                            && scope.equals(Application.getProcessName())) {
+                        result.putBoolean(ActivationProbeProtocol.CAMERA68_STREET_READY,
+                                Camera68QuickLaunchHooks.hasStreetStyleBridge(loader));
+                        result.putIntArray(ActivationProbeProtocol.CAMERA68_CLASSIC_MODES,
+                                Camera68ClassicStyleHooks.supportedModes(loader));
+                    }
                     reply.send(1, result);
                 } catch (RuntimeException error) {
                     XposedBridge.log("[HandleFixActivation] invalid probe: " + error);

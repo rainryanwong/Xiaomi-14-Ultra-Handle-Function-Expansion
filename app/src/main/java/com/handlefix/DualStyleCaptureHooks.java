@@ -174,8 +174,9 @@ public final class DualStyleCaptureHooks {
         sClassLoader = classLoader;
         sCameraVersionCode = cameraVersionCode;
         sPrometheusProfile = prometheusProfile;
-        boolean needsDirectCancel = !prometheusProfile
-                && cameraVersionCode == CameraBuilds.OFFICIAL_OS4_6_6_510_VERSION_CODE;
+        boolean needsDirectCancel = CameraBuilds.isCamera68Port(cameraVersionCode)
+                || (!prometheusProfile
+                && cameraVersionCode == CameraBuilds.OFFICIAL_OS4_6_6_510_VERSION_CODE);
         sReady = keyDown > 0 && keyUp > 0 && perform > 0 && start > 0 && finished > 0
                 && firstFrame > 0
                 && ((cameraActionField != null && shutterButtonClick != null)
@@ -251,12 +252,23 @@ public final class DualStyleCaptureHooks {
         @Override
         protected void beforeHookedMethod(MethodHookParam param) {
             KeyEvent event = event(param.args);
-            if (!isShutter(event) || !sReady || event.isCanceled()
+            if (!isShutter(event) || !sReady
                     || event.getAction() != KeyEvent.ACTION_UP) {
                 return;
             }
-            CaptureState state = stateFor(param.thisObject);
+            CaptureState state = stateFor(param.thisObject, event);
             if (state == null) {
+                return;
+            }
+            if (event.isCanceled()) {
+                boolean secondInFlight;
+                synchronized (state) {
+                    state.keyReleased = true;
+                    secondInFlight = state.secondRequested;
+                }
+                if (!secondInFlight) {
+                    finishAfterSecond(param.thisObject, classLoader, state, "physical shutter canceled");
+                }
                 return;
             }
             long duration = duration(event);
@@ -267,6 +279,19 @@ public final class DualStyleCaptureHooks {
             }
             synchronized (state) {
                 state.keyReleased = true;
+            }
+            qualifyIfLong(param.thisObject, classLoader, event);
+            if (isCamera68Street(state) && state.firstStarted && state.longQualified
+                    && !state.nativeReleaseCompleted) {
+                // A first shot can finish before the first hardware repeat. Release on the
+                // physical UP as well so this path uses the same StreetModule cleanup.
+                if (!releaseCamera68Street(param.thisObject)) {
+                    removeState(param.thisObject, state);
+                    return;
+                }
+                synchronized (state) {
+                    state.nativeReleaseCompleted = true;
+                }
             }
             if (shouldConsumeStreetPhysicalRelease(state)) {
                 // C3 在阈值处已经调用过普通释放和 StreetModule 长按清理。真实 UP
@@ -279,17 +304,17 @@ public final class DualStyleCaptureHooks {
                     return;
                 }
             }
-            qualifyIfLong(param.thisObject, classLoader, event);
         }
 
         @Override
         protected void afterHookedMethod(MethodHookParam param) {
+            if (param.hasThrowable()) return;
             KeyEvent event = event(param.args);
             if (!isShutter(event) || !sReady || event.isCanceled()
                     || event.getAction() != KeyEvent.ACTION_UP) {
                 return;
             }
-            CaptureState state = stateFor(param.thisObject);
+            CaptureState state = stateFor(param.thisObject, event);
             if (state == null) {
                 return;
             }
@@ -330,9 +355,11 @@ public final class DualStyleCaptureHooks {
             } else {
                 return;
             }
-            CaptureState state = stateFor(param.thisObject);
+            CaptureState state = event == null
+                    ? stateFor(param.thisObject) : stateFor(param.thisObject, event);
+            if (state == null) return;
             if (repeatCount == 0) {
-                if (state != null && Boolean.TRUE.equals(param.args[3])
+                if (Boolean.TRUE.equals(param.args[3])
                         && param.args[0] instanceof Integer) {
                     synchronized (state) {
                         state.triggerMode = ((Integer) param.args[0]).intValue();
@@ -343,37 +370,39 @@ public final class DualStyleCaptureHooks {
                 return;
             }
             if (event != null) {
+                if (CameraBuilds.isCamera68Port(sCameraVersionCode)
+                        && duration(event) < ModeConfig.getShutterLongPressMs()) {
+                    // 已选双风格的手势要等到配置阈值，避免原生 repeat 提前触发连拍。
+                    param.setResult(null);
+                    return;
+                }
                 qualifyIfLong(param.thisObject, classLoader, event);
             }
             boolean directCancel = false;
-            if (state != null) {
-                synchronized (state) {
-                    if (state.longQualified && state.firstStarted
-                            && state.triggerMode > 0 && !state.nativeReleaseCompleted
-                            && !state.logicalReleaseInFlight) {
-                        state.logicalReleaseInFlight = true;
-                        if (usesDirectCancelRelease()) {
-                            // 官方 OS4 6.6.510 的 performKeyClicked(pressed=false) 不是纯释放：
-                            // 它还会再次进入 doKeyShutterSnap，首拍仍在处理时便弹出
-                            // “当前功能不支持高速连拍”。该包已有 ImageActionImpl 的真实
-                            // onShutterButtonCancel(true) 入口，只清理 downTime/button status，
-                            // 因此这里精确改用该入口，避免把“释放”伪装成第二次拍照。
-                            directCancel = true;
-                        } else {
-                            // 其它已实测版本继续复用其 pressed=false 原生释放语义。
-                            param.args[3] = Boolean.FALSE;
-                            HandleFixModule.log("dual-style: native logical release requested"
-                                    + " duration=" + stateDuration(state) + "ms mode=" + state.mode);
-                        }
-                    } else if (state.suppressNative) {
-                        // 逻辑释放后的后续 repeat 不得继续触发 Phoenix 原生长按动作。
-                        param.setResult(null);
+            synchronized (state) {
+                if (state.longQualified && state.firstStarted
+                        && state.triggerMode > 0 && !state.nativeReleaseCompleted
+                        && !state.logicalReleaseInFlight) {
+                    state.logicalReleaseInFlight = true;
+                    if (usesDirectCancelRelease()) {
+                        // 6.6.510 和 1770 的 pressed=false 可能重新进入拍摄。在这些版本
+                        // 用 ImageActionImpl.onShutterButtonCancel(true) 释放按钮状态。
+                        directCancel = true;
+                    } else {
+                        param.args[3] = Boolean.FALSE;
+                        HandleFixModule.log("dual-style: native logical release requested"
+                                + " duration=" + stateDuration(state) + "ms mode=" + state.mode);
                     }
+                } else if (state.suppressNative) {
+                    // 逻辑释放后阻止同一次按压的后续 repeat。
+                    param.setResult(null);
                 }
             }
             if (directCancel) {
-                boolean released = invokeNativeShutterCancel(param.thisObject);
-                if (released && needsStreetLongPressCleanup(state)) {
+                boolean camera68Street = isCamera68Street(state);
+                boolean released = camera68Street ? releaseCamera68Street(param.thisObject)
+                        : invokeNativeShutterCancel(param.thisObject);
+                if (released && !camera68Street && needsStreetLongPressCleanup(state)) {
                     // 官方 6.6.510 的 StreetModule 额外维护 mMultiCap 长按状态。
                     // onShutterButtonCancel(true) 只结束焦点/按钮按下态，并不会调用
                     // StreetModule.CameraActionImpl.onShutterButtonLongClickCancel(boolean)
@@ -391,18 +420,23 @@ public final class DualStyleCaptureHooks {
                     HandleFixModule.log("dual-style: native cancel release completed mode="
                             + state.mode);
                     maybeStartSecond(param.thisObject, classLoader, state);
-                } else {
+                } else if (!CameraBuilds.isCamera68Port(sCameraVersionCode)) {
                     // 运行时入口意外失败时保留旧的可回退释放链，不让快门卡在按下态。
                     param.args[3] = Boolean.FALSE;
                     HandleFixModule.log("dual-style: native cancel release failed;"
                             + " fallback to pressed=false mode=" + state.mode);
+                } else {
+                    // 1770 的 pressed=false 分支可能主动处理一次快门，不能用来替代释放。
+                    removeState(param.thisObject, state);
                 }
             }
         }
 
         @Override
         protected void afterHookedMethod(MethodHookParam param) {
-            CaptureState state = stateFor(param.thisObject);
+            KeyEvent event = event(param.args);
+            CaptureState state = event == null
+                    ? stateFor(param.thisObject) : stateFor(param.thisObject, event);
             if (state == null) {
                 return;
             }
@@ -424,6 +458,7 @@ public final class DualStyleCaptureHooks {
 
     /** 标记原生首拍/第二拍是否真正进入 startNormalCapture。 */
     private static final class StartCaptureHook extends XC_MethodHook {
+        private static final String CLAIMED_CAPTURE = "com.handlefix.dualStyle.claimedCapture";
         private final ClassLoader classLoader;
 
         StartCaptureHook(ClassLoader classLoader) {
@@ -440,6 +475,7 @@ public final class DualStyleCaptureHooks {
                 if (state.phase == Phase.WAITING_FIRST) {
                     state.firstStarted = true;
                     state.phase = Phase.CAPTURING_FIRST;
+                    param.setObjectExtra(CLAIMED_CAPTURE, state);
                     HandleFixModule.log("dual-style: first capture started mode="
                             + state.mode);
                 } else if (state.phase == Phase.SWITCHING && state.secondRequested
@@ -448,6 +484,7 @@ public final class DualStyleCaptureHooks {
                     // startNormalCapture 后才算启动；不能把“请求已接受”误当成已拍摄。
                     state.secondStarted = true;
                     state.phase = Phase.CAPTURING_SECOND;
+                    param.setObjectExtra(CLAIMED_CAPTURE, state);
                     HandleFixModule.log("dual-style: second capture started trigger="
                             + state.triggerMode + " mode=" + state.mode);
                 }
@@ -456,8 +493,9 @@ public final class DualStyleCaptureHooks {
 
         @Override
         protected void afterHookedMethod(MethodHookParam param) {
-            CaptureState state = stateFor(param.thisObject);
-            if (state == null || !(param.getResult() instanceof Boolean)) {
+            CaptureState state = (CaptureState) param.getObjectExtra(CLAIMED_CAPTURE);
+            if (state == null || !isCurrent(param.thisObject, state)
+                    || !(param.getResult() instanceof Boolean)) {
                 return;
             }
             boolean accepted = ((Boolean) param.getResult()).booleanValue();
@@ -500,8 +538,8 @@ public final class DualStyleCaptureHooks {
             boolean second;
             synchronized (state) {
                 second = state.secondStarted;
-                if (second) {
-                } else if (state.firstStarted) {
+                if (!second) {
+                    if (!state.firstStarted || state.firstCompleted || state.firstFailed) return;
                     state.firstCompleted = success;
                     state.firstFailed = !success;
                 }
@@ -591,6 +629,7 @@ public final class DualStyleCaptureHooks {
     /** 一次物理按键的状态；弱键避免持有 Camera2Module 生命周期。 */
     private static final class CaptureState {
         final int mode;
+        final int deviceId;
         final long downTime;
         final LeicaStateAdapter.State initialState;
         Phase phase = Phase.WAITING_FIRST;
@@ -607,11 +646,17 @@ public final class DualStyleCaptureHooks {
         boolean awaitingSecondPreview;
         boolean secondRequested;
         boolean secondStarted;
+        boolean cvChangedByTransaction;
 
-        CaptureState(int mode, long downTime, LeicaStateAdapter.State initialState) {
+        CaptureState(int mode, KeyEvent event, LeicaStateAdapter.State initialState) {
             this.mode = mode;
-            this.downTime = downTime;
+            this.deviceId = event.getDeviceId();
+            this.downTime = event.getDownTime();
             this.initialState = initialState;
+        }
+
+        boolean matches(KeyEvent event) {
+            return event.getDeviceId() == deviceId && event.getDownTime() == downTime;
         }
     }
 
@@ -622,13 +667,15 @@ public final class DualStyleCaptureHooks {
         if (!ModeConfig.F_DUAL_STYLE_CAPTURE.equals(action)) {
             return;
         }
+        if (mode == ModeConfig.MODE_STREET && CameraBuilds.isCamera68Port(sCameraVersionCode)
+                && sShutterButtonLongClickCancel == null) return;
         LeicaStateAdapter.State initial = LeicaStateAdapter.read(classLoader, mode);
         if (initial == LeicaStateAdapter.State.UNKNOWN) {
             // 第一张仍由原生相机完成，但不猜测 CV 状态，避免第二张风格或恢复方向错误。
             HandleFixModule.log("dual-style: CV state unknown; keep native single capture");
             return;
         }
-        CaptureState state = new CaptureState(mode, event.getDownTime(), initial);
+        CaptureState state = new CaptureState(mode, event, initial);
         synchronized (STATES) {
             if (sActiveState != null) {
                 // 上一次状态尚未由真实完成/超时回调收口时，不把新按键串入旧状态机。
@@ -679,7 +726,7 @@ public final class DualStyleCaptureHooks {
     }
 
     private static void qualifyIfLong(Object module, ClassLoader classLoader, KeyEvent event) {
-        CaptureState state = stateFor(module);
+        CaptureState state = stateFor(module, event);
         if (state == null || duration(event) < ModeConfig.getShutterLongPressMs()) {
             return;
         }
@@ -729,6 +776,9 @@ public final class DualStyleCaptureHooks {
         if (!isCurrent(module, state)) {
             return;
         }
+        synchronized (state) {
+            if (state.phase != Phase.SWITCHING) return;
+        }
         if (state.triggerMode <= 0) {
             finishWithoutCapture(module, classLoader, state,
                     "native trigger mode missing");
@@ -741,17 +791,22 @@ public final class DualStyleCaptureHooks {
                     "CV changed before second capture");
             return;
         }
-        if (!toggleCvType(classLoader, state.mode)) {
+        boolean toggled = toggleCvType(classLoader, state.mode);
+        LeicaStateAdapter.State after = LeicaStateAdapter.read(classLoader, state.mode);
+        synchronized (state) {
+            state.cvChangedByTransaction = after == target;
+        }
+        if (!toggled) {
             finishWithoutCapture(module, classLoader, state, "CV switch rejected");
             return;
         }
-        LeicaStateAdapter.State after = LeicaStateAdapter.read(classLoader, state.mode);
         if (after != target) {
             finishWithoutCapture(module, classLoader, state,
                     "CV switch readback mismatch target=" + target + " actual=" + after);
             return;
         }
         synchronized (state) {
+            if (state.phase != Phase.SWITCHING) return;
             state.awaitingSecondPreview = true;
             state.phase = Phase.WAITING_SECOND_PREVIEW;
         }
@@ -826,10 +881,13 @@ public final class DualStyleCaptureHooks {
         if (!isCurrent(module, state)) {
             return;
         }
+        boolean restoreCv;
         synchronized (state) {
             state.phase = Phase.RESTORING;
+            restoreCv = state.cvChangedByTransaction;
         }
-        LeicaStateAdapter.State current = LeicaStateAdapter.read(classLoader, state.mode);
+        LeicaStateAdapter.State current = restoreCv
+                ? LeicaStateAdapter.read(classLoader, state.mode) : state.initialState;
         if (current == LeicaStateAdapter.State.UNKNOWN) {
             // UNKNOWN 不能通过“再切一次”猜恢复方向；那可能把相机留在另一种 CV。
             // 这里仅清理状态并记录诊断，让用户仍可用相机原生切换恢复，而不是叠加
@@ -920,8 +978,9 @@ public final class DualStyleCaptureHooks {
     }
 
     private static boolean usesDirectCancelRelease() {
-        return !sPrometheusProfile
-                && sCameraVersionCode == CameraBuilds.OFFICIAL_OS4_6_6_510_VERSION_CODE
+        return (CameraBuilds.isCamera68Port(sCameraVersionCode)
+                || (!sPrometheusProfile
+                && sCameraVersionCode == CameraBuilds.OFFICIAL_OS4_6_6_510_VERSION_CODE))
                 && sCameraActionField != null && sShutterButtonCancel != null;
     }
 
@@ -944,14 +1003,27 @@ public final class DualStyleCaptureHooks {
     }
 
     private static boolean needsStreetLongPressCleanup(CaptureState state) {
-        return state != null && state.mode == 225
-                && !sPrometheusProfile
-                && sCameraVersionCode == CameraBuilds.OFFICIAL_OS4_6_6_510_VERSION_CODE
+        return state != null && state.mode == ModeConfig.MODE_STREET
+                && (isCamera68Street(state) || (!sPrometheusProfile
+                && sCameraVersionCode == CameraBuilds.OFFICIAL_OS4_6_6_510_VERSION_CODE))
                 && sCameraActionField != null && sShutterButtonLongClickCancel != null;
     }
 
+    private static boolean isCamera68Street(CaptureState state) {
+        return state != null && state.mode == ModeConfig.MODE_STREET
+                && CameraBuilds.isCamera68Port(sCameraVersionCode);
+    }
+
+    private static boolean releaseCamera68Street(Object module) {
+        // 1770's StreetModule$a calls mMultiCap.b() with false, without the click(10)
+        // branch. The base cancel separately closes the capture button status.
+        return invokeNativeShutterCancel(module) && invokeNativeShutterLongClickCancel(module);
+    }
+
     private static boolean needsDirectStreetSingleCapture(CaptureState state) {
-        return needsStreetLongPressCleanup(state) && sStartNormalCapture != null;
+        // 1770's StreetModule$a inherits the normal click and its focus/camera guards.
+        return !isCamera68Street(state) && needsStreetLongPressCleanup(state)
+                && sStartNormalCapture != null;
     }
 
     private static boolean shouldConsumeStreetPhysicalRelease(CaptureState state) {
@@ -999,10 +1071,20 @@ public final class DualStyleCaptureHooks {
         return state != null && state.mode == mode;
     }
 
+    public static boolean ownsShutterGesture(int mode, KeyEvent event) {
+        CaptureState state = activeState();
+        return state != null && state.mode == mode && state.matches(event);
+    }
+
     private static CaptureState stateFor(Object module) {
         synchronized (STATES) {
             return STATES.get(module);
         }
+    }
+
+    private static CaptureState stateFor(Object module, KeyEvent event) {
+        CaptureState state = stateFor(module);
+        return state != null && state.matches(event) ? state : null;
     }
 
     private static boolean isCurrent(Object module, CaptureState state) {
@@ -1073,7 +1155,9 @@ public final class DualStyleCaptureHooks {
             return false;
         }
         int code = event.getKeyCode();
-        return code == KEYCODE_SHUTTER || code == KEYCODE_SHUTTER_ALT;
+        if (code != KEYCODE_SHUTTER && code != KEYCODE_SHUTTER_ALT) return false;
+        return !CameraBuilds.isCamera68Port(sCameraVersionCode)
+                || (ModeConfig.isCamera68Mapping() && GripInputGuard.isGripEvent(event));
     }
 
     private static long duration(KeyEvent event) {
@@ -1089,6 +1173,9 @@ public final class DualStyleCaptureHooks {
      * 否则预览、顶栏和最终 JPEG 可能处于不同状态。
      */
     private static boolean toggleCvType(ClassLoader classLoader, int mode) {
+        if (CameraBuilds.isCamera68Port(sCameraVersionCode)) {
+            return LeicaStateAdapter.toggleCamera68CvType(classLoader, mode);
+        }
         if (CameraBuilds.isPhoenixOs4Family(sCameraVersionCode)) {
             return PhoenixLeicaHooks.toggleCvType(classLoader, mode);
         }

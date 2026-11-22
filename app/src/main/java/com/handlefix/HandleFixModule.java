@@ -74,14 +74,34 @@ public class HandleFixModule implements IXposedHookLoadPackage {
             final boolean streetSpecial = ModeConfig.isStreetSpecialForceEnabled();
             final long cameraVersionCode = CameraBuilds.readVersionCode(loadPackageParam.appInfo);
             CAMERA_VERSION_CODE = cameraVersionCode;
+            final boolean camera68 = CameraBuilds.isCamera68Port(cameraVersionCode);
+            final boolean camera68Mapping = ModeConfig.isCamera68Mapping();
             final boolean v51 = ModeConfig.isV51Enabled()
                     && cameraVersionCode == CameraBuilds.PROMETHEUS_MODULE_V51_VERSION_CODE;
             final boolean phoenixOs4Family = CameraBuilds.isPhoenixOs4Family(cameraVersionCode);
-            final String mappingProfile = phoenixOs4Family ? "phoenix-os4" : (fixOn ? "prometheus" : "official");
+            final String mappingProfile = camera68Mapping ? "camera68"
+                    : phoenixOs4Family ? "phoenix-os4" : (fixOn ? "prometheus" : "official");
             ENV_LOAD_LINE = "pkg=" + loadPackageParam.packageName + " ver=" + ver + "(" + vcode + ")"
                     + " appInfoVcode=" + cameraVersionCode + " profile=" + mappingProfile
                     + " promFix=" + fixOn + " v51=" + v51 + " streetSpecial=" + streetSpecial;
             log("== HandleFixModule loaded: " + ENV_LOAD_LINE + " ==");
+
+            // The Aurora camera port supplies N1G recognition and basic input routing.
+            if (camera68 || camera68Mapping) {
+                if (camera68 && camera68Mapping && CAM_PKG.equals(loadPackageParam.processName)) {
+                    EnvHooks.install(cl);
+                    GripMotionGuardHooks.install();
+                    FocusPolicyHooks.install(cl);
+                    Camera68QuickLaunchHooks.installIfSupported(cl, cameraVersionCode);
+                    QuickVideoLaunchHooks.install(cl);
+                    Camera68InputHooks.install(cl, cameraVersionCode);
+                    DualStyleCaptureHooks.install(cl, cameraVersionCode);
+                    ShutterHoldBurstController.installIfSupported(
+                            loadPackageParam.packageName, cl, cameraVersionCode, mappingProfile, false);
+                    logInstallSummary();
+                }
+                return;
+            }
 
             // ================= 版本适配对照表 =================
             // Phoenix OS4 版本组（当前实测 0.3.0，基线 6.6.510）：无论界面选择都先识别，

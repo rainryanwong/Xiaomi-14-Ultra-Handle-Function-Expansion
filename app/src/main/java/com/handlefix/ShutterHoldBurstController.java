@@ -56,9 +56,10 @@ public final class ShutterHoldBurstController {
             String mappingProfile,
             boolean configChainRecognized) {
         final boolean prometheusProfile = HandleFixModule.promFix();
+        final boolean camera68 = CameraBuilds.isCamera68Port(cameraVersionCode);
         if (!HandleFixModule.CAM_PKG.equals(packageName)
-                || !CameraBuilds.isModernHoldBurstCandidate(
-                cameraVersionCode, prometheusProfile)) {
+                || (camera68 ? !ModeConfig.isCamera68Mapping()
+                : !CameraBuilds.isModernHoldBurstCandidate(cameraVersionCode, prometheusProfile))) {
             return;
         }
         // Phoenix 的版本组只表示可能沿用 OS4 基线；配置 Profile 未确认时不安装。
@@ -86,9 +87,10 @@ public final class ShutterHoldBurstController {
         final boolean phoenixOs4 = CameraBuilds.isPhoenixOs4Family(cameraVersionCode);
         final boolean officialOs4 = !prometheusProfile
                 && cameraVersionCode == CameraBuilds.OFFICIAL_OS4_6_6_510_VERSION_CODE;
+        final boolean camera68 = CameraBuilds.isCamera68Port(cameraVersionCode);
         final boolean oemDecisionBridge = phoenixOs4 || officialOs4;
-        final String lambdaName = (phoenixOs4 || cameraVersionCode
-                == CameraBuilds.OFFICIAL_OS4_6_6_510_VERSION_CODE)
+        final String lambdaName = camera68 ? "lambda$performMiHandlePressed$51"
+                : (phoenixOs4 || cameraVersionCode == CameraBuilds.OFFICIAL_OS4_6_6_510_VERSION_CODE)
                 ? "lambda$performMiHandlePressed$50"
                 : "lambda$performMiHandlePressed$49";
 
@@ -99,7 +101,7 @@ public final class ShutterHoldBurstController {
          */
         if (!hasCommonNativeChain(camera2Module)
                 || !hasExactBurstDecision(camera2Module, classLoader, lambdaName,
-                oemDecisionBridge, phoenixOs4 || officialOs4)) {
+                oemDecisionBridge, camera68)) {
             log("install aborted: native hold-burst descriptor unavailable"
                     + " versionCode=" + cameraVersionCode
                     + " profile=" + mappingProfile
@@ -152,7 +154,13 @@ public final class ShutterHoldBurstController {
      */
     private static boolean hasExactBurstDecision(Class<?> camera2Module,
             ClassLoader classLoader, String lambdaName, boolean oemDecisionBridge,
-            boolean expectsQ6L) {
+            boolean camera68) {
+        if (camera68) {
+            Class<?> miHandle = findClass("R6.M", classLoader);
+            return miHandle != null
+                    && findExactMethod(camera2Module, lambdaName, Boolean.class,
+                    new Class<?>[]{KeyEvent.class, miHandle}, true) != null;
+        }
         if (!oemDecisionBridge) {
             return hasExactMiHandleLambda(camera2Module, lambdaName);
         }
@@ -312,7 +320,9 @@ public final class ShutterHoldBurstController {
     private static boolean isShutterEvent(KeyEvent event) {
         if (event == null) return false;
         int keyCode = event.getKeyCode();
-        return keyCode == KEY_SHUTTER || keyCode == KEY_SHUTTER_ALT;
+        if (keyCode != KEY_SHUTTER && keyCode != KEY_SHUTTER_ALT) return false;
+        return !CameraBuilds.isCamera68Port(HandleFixModule.CAMERA_VERSION_CODE)
+                || (ModeConfig.isCamera68Mapping() && GripInputGuard.isGripEvent(event));
     }
 
     private static boolean isSupportedMode(int mode) {

@@ -1,10 +1,13 @@
 package com.handlefix.system;
 
 import android.app.ActivityManager;
+import android.app.ActivityOptions;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
+import android.os.Build;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -13,7 +16,9 @@ import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.view.KeyEvent;
 
+import com.handlefix.Camera68Companion;
 import com.handlefix.CameraBuilds;
+import com.handlefix.Camera68LaunchTargets;
 import com.handlefix.GripInputGuard;
 import com.handlefix.HandleFixModule;
 import com.handlefix.ModeConfig;
@@ -26,7 +31,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * 相机外变焦拨杆长拨快捷启动。
  *
  * <p>状态机运行在 system_server 的按键入队阶段：配置方向的首个 DOWN 在确认相机
- * 不在前台且当前安装包属于 Phoenix 后才被接管；达到阈值时发送相机原生
+ * 不在前台且当前安装包与快捷启动方案匹配后才被接管；达到阈值时发送相机原生
  * CAMERA_MODE Intent，UP 只结束本次事务。锁屏/息屏是否允许触发完全交给
  * {@link GripInputGuard} 的用户配置决定，本类不再叠加第二套屏幕状态门。这样既不需要
  * 模拟触摸，也不会改动相机前台的变焦拨杆映射。</p>
@@ -52,16 +57,19 @@ final class GripQuickLaunchController {
         final long downTime;
         final String target;
         final Context context;
+        final boolean camera68;
         final Runnable trigger;
         volatile boolean cancelled;
         volatile boolean triggered;
 
-        Press(int deviceId, int keyCode, long downTime, String target, Context context) {
+        Press(int deviceId, int keyCode, long downTime, String target, Context context,
+                boolean camera68) {
             this.deviceId = deviceId;
             this.keyCode = keyCode;
             this.downTime = downTime;
             this.target = target;
             this.context = context;
+            this.camera68 = camera68;
             this.trigger = new Runnable() {
                 @Override public void run() {
                     fire(Press.this);
@@ -99,7 +107,7 @@ final class GripQuickLaunchController {
             // 同一物理事务内换向时取消旧计时，并吞到新方向松开；不能让两侧分别触发。
             cancel(active);
             Press blocked = new Press(deviceId, event.getKeyCode(), event.getDownTime(),
-                    ModeConfig.GRIP_QUICK_NATIVE, active.context);
+                    ModeConfig.GRIP_QUICK_NATIVE, active.context, active.camera68);
             blocked.cancelled = true;
             PRESSES.put(deviceId, blocked);
             return Integer.valueOf(0);
@@ -108,11 +116,13 @@ final class GripQuickLaunchController {
         String target = ModeConfig.getGripQuickTarget(event.getKeyCode() == KEY_ZOOM_IN);
         if (ModeConfig.GRIP_QUICK_NATIVE.equals(target)) return null;
         Context context = contextOf(phoneWindowManager);
-        if (!canArm(context) || !isPhoenixCamera(context)
+        boolean camera68 = ModeConfig.isCamera68Mapping();
+        if (!canArm(context) || !matchesCamera(context, camera68, target)
                 || GripInputGuard.isRestricted(context, ModeConfig.GRIP_INPUT_ZOOM)) {
             return null;
         }
-        Press press = new Press(deviceId, event.getKeyCode(), event.getDownTime(), target, context);
+        Press press = new Press(deviceId, event.getKeyCode(), event.getDownTime(), target,
+                context, camera68);
         PRESSES.put(deviceId, press);
         HANDLER.postDelayed(press.trigger, ModeConfig.getGripQuickLongPressMs());
         return Integer.valueOf(0);
@@ -120,7 +130,8 @@ final class GripQuickLaunchController {
 
     private static void fire(Press press) {
         if (press.cancelled || press.triggered || PRESSES.get(press.deviceId) != press) return;
-        if (!canArm(press.context) || !isPhoenixCamera(press.context)
+        if (!canArm(press.context) || press.camera68 != ModeConfig.isCamera68Mapping()
+                || !matchesCamera(press.context, press.camera68, press.target)
                 || GripInputGuard.isRestricted(press.context, ModeConfig.GRIP_INPUT_ZOOM)
                 || !press.target.equals(ModeConfig.getGripQuickTarget(
                 press.keyCode == KEY_ZOOM_IN))) {
@@ -132,7 +143,7 @@ final class GripQuickLaunchController {
             press.cancelled = true;
             return;
         }
-        if (!startCamera(press.context, press.target)) {
+        if (!startCamera(press.context, press.target, press.camera68)) {
             press.cancelled = true;
             HandleFixModule.log("grip-quick-launch: start failed target=" + press.target);
             return;
@@ -152,9 +163,17 @@ final class GripQuickLaunchController {
         HANDLER.removeCallbacks(press.trigger);
     }
 
-    private static boolean startCamera(Context context, String target) {
+    private static boolean startCamera(Context context, String target, boolean camera68) {
+        boolean forceStreetStyle = camera68 && Camera68LaunchTargets.requiresStreetStyleBridge(target);
         String cameraMode;
-        if (ModeConfig.GRIP_QUICK_LEGEND.equals(target)) {
+        if (camera68) {
+            if (forceStreetStyle && !Camera68Companion.isCameraCompatInstalled(context)) {
+                HandleFixModule.log("grip-quick-launch: CameraCompat street style unavailable");
+                return false;
+            }
+            cameraMode = Camera68LaunchTargets.cameraModeForTarget(target);
+            if (cameraMode == null) return false;
+        } else if (ModeConfig.GRIP_QUICK_LEGEND.equals(target)) {
             cameraMode = "LEGEND";
         } else if (ModeConfig.GRIP_QUICK_CAPTURE.equals(target)) {
             cameraMode = "CAPTURE";
@@ -182,7 +201,9 @@ final class GripQuickLaunchController {
         } else {
             return false;
         }
-        if (!removeExistingCameraTasks(context, target)) {
+        // A cold start cannot prove whether the in-camera bridge will be available. Submit the
+        // forced-style request without explicitly destroying the existing camera task.
+        if (!forceStreetStyle && !removeExistingCameraTasks(context, target)) {
             // Phoenix 的全部快捷模式跳转都必须从干净任务进入。尤其在息屏/锁屏场景，
             // 直接复用旧 Camera Activity 会出现“首次只振动，第二次才显示”的竞态；
             // 任务移除失败时宁可不启动、不振动，也不能给出虚假的成功反馈。
@@ -193,14 +214,15 @@ final class GripQuickLaunchController {
         intent.putExtra(EXTRA_CAMERA_MODE, cameraMode);
         // Phoenix 只允许白名单来源使用自定义 CAMERA_MODE；该 referrer 经过 1.2.14
         // 冷/热启动实机验证。模块私有 launch_source 仍用于相机侧识别本功能。
-        intent.putExtra(EXTRA_REFERRER_NAME, "android-app://com.miui.home");
+        if (!camera68) intent.putExtra(EXTRA_REFERRER_NAME, "android-app://com.miui.home");
         intent.putExtra("com.android.systemui.camera_launch_source",
                 ModeConfig.GRIP_QUICK_LAUNCH_SOURCE);
         // 与系统快捷录像复用相机自己的锁屏入口语义：允许相机显示在 Keyguard 上并
         // 按自身策略点亮屏幕，但不绕过解锁。输入保护若已启用，会在到达这里前拦截。
         intent.putExtra("StartActivityWhenLocked", true);
         intent.putExtra("ShowCameraWhenLocked", true);
-        int exactMode = exactModuleForTarget(target);
+        int exactMode = camera68 ? Camera68LaunchTargets.routeForTarget(target)
+                : exactModuleForTarget(target);
         if (exactMode != 0) {
             intent.putExtra(ModeConfig.EXTRA_HANDLEFIX_QUICK_MODE_TARGET, exactMode);
         }
@@ -209,7 +231,9 @@ final class GripQuickLaunchController {
             // 精确 Fragment 工厂 Hook，不能改 Phoenix 的持久主题或街拍偏好。
             intent.putExtra(ModeConfig.EXTRA_HANDLEFIX_QUICK_STREET_LEGEND_UI, true);
         }
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        if (!forceStreetStyle) intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        if (camera68) return startCamera68Activity(context, intent);
         try {
             Method method = Context.class.getMethod(
                     "startActivityAsUser", Intent.class, UserHandle.class);
@@ -232,7 +256,7 @@ final class GripQuickLaunchController {
      * 使用固定延时、双 Intent 或模拟按键；没有旧任务时直接放行，检查/移除失败时
      * fail closed。229 传奇款的一次性 UI 标记仍由新 Activity 的原生构造流程消费。
      */
-    private static boolean removeExistingCameraTasks(Context context, String target) {
+    static boolean removeExistingCameraTasks(Context context, String target) {
         try {
             ActivityManager am = (ActivityManager) context.getSystemService(
                     Context.ACTIVITY_SERVICE);
@@ -294,11 +318,38 @@ final class GripQuickLaunchController {
         return context != null && !isCameraForeground(context);
     }
 
-    private static boolean isPhoenixCamera(Context context) {
+    private static boolean matchesCamera(Context context, boolean camera68, String target) {
+        return camera68 ? isCamera68Camera(context)
+                && Camera68LaunchTargets.supportsTarget(target)
+                : ModeConfig.isPromFixEnabled()
+                        && CameraBuilds.isPhoenixOs4Family(installedCameraVersion(context));
+    }
+
+    static boolean isCamera68Camera(Context context) {
+        return Build.VERSION.SDK_INT >= 35
+                && CameraBuilds.isCamera68Port(installedCameraVersion(context));
+    }
+
+    static long installedCameraVersion(Context context) {
         try {
             PackageInfo info = context.getPackageManager().getPackageInfo(CAMERA_PACKAGE, 0);
-            return CameraBuilds.isPhoenixOs4Family(info.getLongVersionCode());
-        } catch (Throwable ignored) {
+            return info.getLongVersionCode();
+        } catch (android.content.pm.PackageManager.NameNotFoundException error) {
+            return -1L;
+        }
+    }
+
+    @android.annotation.TargetApi(35)
+    static boolean startCamera68Activity(Context context, Intent intent) {
+        try {
+            // 由 ActivityTaskManager 向相机传递 system_server 真实 UID，用于验证启动请求。
+            Bundle options = ActivityOptions.makeBasic().setShareIdentityEnabled(true).toBundle();
+            Method method = Context.class.getMethod("startActivityAsUser",
+                    Intent.class, Bundle.class, UserHandle.class);
+            method.invoke(context, intent, options, currentUserHandle());
+            return true;
+        } catch (ReflectiveOperationException | RuntimeException error) {
+            HandleFixModule.log("camera68: explicit camera launch failed", error);
             return false;
         }
     }
